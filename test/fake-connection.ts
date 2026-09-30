@@ -45,9 +45,14 @@ export class FakeConnection implements AcpConnection {
   readonly calls: Call[] = [];
   readonly logged: string[] = [];
   readonly claudeVersion = "2.1.285";
+  readonly claudeExecutable = "/opt/claude";
   supportsImages = true;
   closed = false;
   resumeFails = false;
+  /** Rejects every session/set_config_option. */
+  configError: unknown;
+  /** Answers session/set_config_option(model) without switching the model. */
+  ignoresModelSwitch = false;
   promptError: unknown;
   onPrompt: PromptScript = async () => ({ stopReason: "end_turn" });
   #nextSession = 0;
@@ -70,9 +75,10 @@ export class FakeConnection implements AcpConnection {
     setSessionMode: async (params) => this.#record("setSessionMode", params),
     setSessionConfigOption: async (params) => {
       this.#record("setSessionConfigOption", params);
+      if (this.configError) throw this.configError;
       const state = this.#state(params.sessionId);
-      if (params.configId === "model")
-        Object.assign(state, { model: String(params.value), effort: "default" });
+      const switches = params.configId === "model" && !this.ignoresModelSwitch;
+      if (switches) Object.assign(state, { model: String(params.value), effort: "default" });
       if (params.configId === "effort") state.effort = String(params.value);
       return { configOptions: this.#options(params.sessionId) };
     },

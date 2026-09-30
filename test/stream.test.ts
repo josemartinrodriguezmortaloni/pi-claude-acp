@@ -62,7 +62,7 @@ function harness(conn = new FakeConnection(), beforeTask = () => {}) {
       events.push(event);
     return events;
   };
-  return { conn, store, windows, logged, permissions, run };
+  return { conn, store, windows, logged, permissions, run, deps };
 }
 
 /** Makes the fake agent emit `updates` during the prompt, then stop with `stopReason`. */
@@ -92,7 +92,7 @@ const finalText = (events: AssistantMessageEvent[]) => {
 };
 
 describe("streamPrompt: content", () => {
-  it("streams agent message chunks as one text block and ends with done/stop", async () => {
+  it("C17: streams agent message chunks as one text block and ends with done/stop", async () => {
     const h = harness();
     script(h.conn, [text("Hola "), text("mundo")], { stopReason: "end_turn" });
     const events = await h.run([user("hola")]);
@@ -106,9 +106,12 @@ describe("streamPrompt: content", () => {
     ]);
     expect(events.at(-1)).toMatchObject({ type: "done", reason: "stop", message: { stopReason: "stop" } });
     expect(finalText(events)).toBe("Hola mundo");
+    expect(events.at(-1)?.type === "done" && events.at(-1)).toMatchObject({
+      message: { usage: { input: 0, output: 0, totalTokens: 0, cost: { total: 0 } } },
+    });
   });
 
-  it("streams thought chunks as thinking and closes the block when text starts", async () => {
+  it("C17: streams thought chunks as thinking and closes the block when text starts", async () => {
     const h = harness();
     script(h.conn, [thought("pienso"), text("respuesta")], { stopReason: "end_turn" });
     const events = await h.run([user("hola")]);
@@ -124,7 +127,7 @@ describe("streamPrompt: content", () => {
     ]);
   });
 
-  it("shows tool calls as text lines, never as Pi tool call events", async () => {
+  it("C17: shows tool calls as text lines, never as Pi tool call events", async () => {
     const h = harness();
     script(
       h.conn,
@@ -153,7 +156,7 @@ describe("streamPrompt: content", () => {
     expect(output).not.toContain("in_progress");
   });
 
-  it("shows the plan as a checklist each time it changes", async () => {
+  it("C17: shows the plan as a checklist each time it changes", async () => {
     const h = harness();
     const plan = (status: "pending" | "completed"): SessionUpdate => ({
       sessionUpdate: "plan",
@@ -169,7 +172,7 @@ describe("streamPrompt: content", () => {
     expect(output).toContain("- [x] Editar");
   });
 
-  it("logs ignored and unknown updates without ending the stream", async () => {
+  it("C17: logs ignored and unknown updates without ending the stream", async () => {
     const h = harness();
     script(
       h.conn,
@@ -186,7 +189,7 @@ describe("streamPrompt: content", () => {
     expect(h.logged.join("\n")).toContain("future_update");
   });
 
-  it("drops updates of other sessions and updates after the turn ends", async () => {
+  it("C21: drops updates of other sessions and updates after the turn ends", async () => {
     const h = harness();
     let sessionId = "";
     h.conn.onPrompt = async (params, fake) => {
@@ -214,7 +217,7 @@ describe("streamPrompt: prompt", () => {
     expect(second?.prompt).toEqual([{ type: "text", text: "otro" }]);
   });
 
-  it("sends images from the user message", async () => {
+  it("C22: sends images from the user message", async () => {
     const h = harness();
     await h.run([
       {
@@ -233,7 +236,7 @@ describe("streamPrompt: prompt", () => {
     });
   });
 
-  it("fails explicitly when the adapter does not announce image support", async () => {
+  it("C22: fails explicitly when the adapter does not announce image support", async () => {
     const h = harness();
     h.conn.supportsImages = false;
     const events = await h.run([
@@ -281,14 +284,14 @@ describe("streamPrompt: prompt", () => {
 });
 
 describe("streamPrompt: end of turn", () => {
-  it("maps cancelled to an aborted error", async () => {
+  it("C18: maps cancelled to an aborted error", async () => {
     const h = harness();
     script(h.conn, [], { stopReason: "cancelled" });
     expect((await h.run([user("hola")])).at(-1)).toMatchObject({ type: "error", reason: "aborted" });
   });
 
   it.each(["max_tokens", "max_turn_requests", "refusal"] as const)(
-    "maps %s to an error with the reason",
+    "C18: maps %s to an error with the reason",
     async (stopReason) => {
       const h = harness();
       script(h.conn, [], { stopReason });
@@ -307,14 +310,24 @@ describe("streamPrompt: end of turn", () => {
     );
   });
 
-  it("C15: names the Claude Code version in other errors", async () => {
+  it("C15: ends with an error and never prompts when the selected model is not offered", async () => {
+    const h = harness();
+    const model = { ...MODEL, id: "claude-opus-5-5" };
+    const events: AssistantMessageEvent[] = [];
+    const context = normalizeContext({ messages: [user("hola")] });
+    for await (const event of streamPrompt(model, context, { sessionId: "pi-1" }, h.deps)) events.push(event);
+    expect(events.at(-1)).toMatchObject({ type: "error", reason: "error" });
+    expect(h.conn.callsOf("prompt")).toEqual([]);
+  });
+
+  it("names the Claude Code version in other errors", async () => {
     const h = harness();
     h.conn.promptError = new Error("model not available");
     const last = (await h.run([user("hola")])).at(-1);
     expect(last?.type === "error" && last.error.errorMessage).toContain("2.1.285");
   });
 
-  it("reads token usage from the prompt response and cost as the delta of the cumulative amount", async () => {
+  it("C19: reads token usage from the prompt response and cost as the delta of the cumulative amount", async () => {
     const h = harness();
     const usage = (amount: number): SessionUpdate => ({
       sessionUpdate: "usage_update",
@@ -345,7 +358,7 @@ describe("streamPrompt: end of turn", () => {
     ]);
   });
 
-  it("aborts: cancels the ACP turn, cancels pending permissions and ends aborted", async () => {
+  it("C20: aborts: cancels the ACP turn, cancels pending permissions and ends aborted", async () => {
     const h = harness();
     const controller = new AbortController();
     let permission: Promise<unknown> = Promise.resolve();

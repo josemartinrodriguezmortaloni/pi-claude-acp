@@ -37,7 +37,7 @@ describe("toEffort", () => {
     expect(toEffort("high", offered)).toBe("high");
   });
 
-  it("picks the closest offered level below the requested one", () => {
+  it("C13: picks the closest offered level below the requested one", () => {
     expect(toEffort("xhigh", offered)).toBe("high");
   });
 
@@ -45,12 +45,12 @@ describe("toEffort", () => {
     expect(toEffort("max", offered)).toBe("max");
   });
 
-  it("sends off and minimal to the lowest offered level", () => {
+  it("C13: sends off and minimal to the lowest offered level", () => {
     expect(toEffort(undefined, offered)).toBe("low");
     expect(toEffort("minimal", offered)).toBe("low");
   });
 
-  it("returns undefined when the model offers no effort", () => {
+  it("C12: returns undefined when the model offers no effort", () => {
     expect(toEffort("high", [])).toBeUndefined();
   });
 });

@@ -54,7 +54,7 @@ function hookCommandOutput(meta: unknown): unknown {
 }
 
 describe("SessionStore.ensure", () => {
-  it("C26: creates every session with no setting sources and the PreToolUse ask hook", async () => {
+  it("C9/C26: creates every session in the Pi cwd with no setting sources and the PreToolUse ask hook", async () => {
     const conn = new FakeConnection();
     const { store: s } = store();
     await s.ensure(conn, "pi-1", "/work", anyBranch);
@@ -119,23 +119,24 @@ describe("SessionStore.ensure", () => {
     expect(reopened.session.conn).toBe(second);
   });
 
-  it("opens a new session with a notice when resuming fails", async () => {
+  it("C6: opens a new session and warns that the history is lost when resuming fails", async () => {
     const conn = new FakeConnection();
     conn.resumeFails = true;
     const { store: s } = store();
     s.load("pi-1", [recordEntry("acp-gone", null)]);
     const { session, notices } = await s.ensure(conn, "pi-1", "/work", anyBranch);
     expect(session.id).not.toBe("acp-gone");
-    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain("sin el historial previo");
   });
 
-  it("opens a new session for a Pi fork, which copies the parent's record", async () => {
+  it("C7: opens a new session with a notice for a Pi fork, which copies the parent's record", async () => {
     const conn = new FakeConnection();
     const { store: s } = store();
     s.load("pi-fork", [recordEntry("acp-parent", null, "pi-parent")]);
-    const { session } = await s.ensure(conn, "pi-fork", "/work", anyBranch);
+    const { session, notices } = await s.ensure(conn, "pi-fork", "/work", anyBranch);
     expect(session.id).not.toBe("acp-parent");
     expect(conn.callsOf("resumeSession")).toEqual([]);
+    expect(notices[0]).toContain("el contexto de Claude Code se reinició");
   });
 
   it("ignores a persisted record without the expected shape", async () => {
@@ -155,13 +156,13 @@ describe("SessionStore.ensure", () => {
     expect(conn.callsOf("closeSession")).toEqual([{ sessionId: session.id }]);
   });
 
-  it("opens a new session with a notice when the saved leaf is no longer on the branch", async () => {
+  it("C7: opens a new session with a notice when the saved leaf is no longer on the branch", async () => {
     const conn = new FakeConnection();
     const { store: s } = store();
     s.load("pi-1", [recordEntry("acp-saved", "leaf-old")]);
     const { session, notices } = await s.ensure(conn, "pi-1", "/work", (leafId) => leafId !== "leaf-old");
     expect(session.id).not.toBe("acp-saved");
-    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain("el contexto de Claude Code se reinició");
     expect(conn.callsOf("resumeSession")).toEqual([]);
   });
 
@@ -237,7 +238,7 @@ describe("SessionStore.promptBlocks", () => {
 });
 
 describe("SessionStore.serialize", () => {
-  it("runs the second prompt of a Pi session after the first one finishes", async () => {
+  it("C8: runs the second prompt of a Pi session after the first one finishes", async () => {
     const { store: s } = store();
     const order: string[] = [];
     let release = () => {};
@@ -269,7 +270,7 @@ describe("applyConfig", () => {
     return (await store().store.ensure(conn, "pi-1", "/work", anyBranch)).session;
   }
 
-  it("sets the model and the mapped effort level", async () => {
+  it("C14: sets the model and the mapped effort level on the existing session", async () => {
     const conn = new FakeConnection();
     const s = await session(conn);
     await applyConfig(s, "opus", "xhigh");
@@ -286,13 +287,44 @@ describe("applyConfig", () => {
     expect(conn.callsOf("setSessionConfigOption")).toHaveLength(1);
   });
 
-  it("switches the model and sends no effort to a model without effort", async () => {
+  it("C12: switches the model and sends no effort to a model without effort", async () => {
     const conn = new FakeConnection();
     const s = await session(conn);
     await applyConfig(s, "haiku", "high");
     expect(conn.callsOf("setSessionConfigOption")).toEqual([
       { sessionId: s.id, configId: "model", value: "haiku" },
     ]);
+  });
+});
+
+describe("applyConfig failures", () => {
+  async function session(conn: FakeConnection): Promise<AcpSession> {
+    return (await store().store.ensure(conn, "pi-1", "/work", anyBranch)).session;
+  }
+
+  it("C14: fails visibly when the adapter rejects the change", async () => {
+    const conn = new FakeConnection();
+    const s = await session(conn);
+    conn.configError = new Error("invalid value");
+    await expect(applyConfig(s, "haiku", undefined)).rejects.toThrow("invalid value");
+  });
+
+  it("C14: fails instead of continuing with another model when the adapter keeps the old one", async () => {
+    const conn = new FakeConnection();
+    const s = await session(conn);
+    conn.ignoresModelSwitch = true;
+    await expect(applyConfig(s, "haiku", undefined)).rejects.toThrow("haiku");
+  });
+
+  it("C15: names the binary and the available models when the model is no longer offered", async () => {
+    const conn = new FakeConnection();
+    const s = await session(conn);
+    const error = (await applyConfig(s, "claude-opus-5-5", undefined).catch((e: unknown) => e)) as Error;
+    expect(error.message).toContain("claude-opus-5-5");
+    expect(error.message).toContain("2.1.285");
+    expect(error.message).toContain("/opt/claude");
+    expect(error.message).toContain("opus, haiku");
+    expect(conn.callsOf("setSessionConfigOption")).toEqual([]);
   });
 });
 

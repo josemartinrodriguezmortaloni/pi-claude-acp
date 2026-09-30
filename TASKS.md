@@ -12,6 +12,8 @@ Referencia: [specs/pi-claude-acp.md](specs/pi-claude-acp.md).
 - [x] `permissions.ts`: puente `claude-acp:tool-request`, UI de Pi, filtro de `allow_always`.
 - [x] `index.ts`: registro del provider y handlers.
 - [x] Smoke test real (`bun run smoke`) y carga en Pi (`pi -e ./src/index.ts`).
+- [x] Los 25 casos de [specs/casos-limite-originales.md](specs/casos-limite-originales.md) y C26-C33 con test (`C<n>` en el nombre).
+- [x] Catálogo por aprendizaje de effort (opción A, confirmada por el usuario).
 
 ## Pendiente
 

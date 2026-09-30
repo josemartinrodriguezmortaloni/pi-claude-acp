@@ -13,6 +13,7 @@ const ADAPTER_ENTRY = join(
   "../node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js",
 );
 const STDERR_TAIL_BYTES = 8192;
+const STDERR_TAIL_LINES = 10;
 
 export type Log = (line: string) => void;
 
@@ -43,6 +44,7 @@ export interface AgentRequests {
 export interface AcpConnection {
   readonly agent: AgentRequests;
   readonly claudeVersion: string;
+  readonly claudeExecutable: string;
   readonly supportsImages: boolean;
   readonly closed: boolean;
   listen(sessionId: string, listener: SessionListener): () => void;
@@ -146,14 +148,19 @@ export function createLog(file: string): Log {
 }
 
 /** Launches the adapter and completes the ACP handshake. */
-export async function openConnection(env: ConnectionEnv, log: Log): Promise<AcpConnection> {
+export async function openConnection(
+  env: ConnectionEnv,
+  log: Log,
+  adapterEntry = ADAPTER_ENTRY,
+): Promise<AcpConnection> {
   const exe = await resolveExecutable(env);
   const claudeVersion = await validateExecutable(exe);
-  const child = spawn("node", [ADAPTER_ENTRY], {
+  const child = spawn("node", [adapterEntry], {
     env: { ...process.env, CLAUDE_CODE_EXECUTABLE: exe },
     stdio: ["pipe", "pipe", "pipe"],
   });
   const stderr = captureStderr(child, log);
+  const exited = exitError(child, stderr);
   const router = new SessionRouter(log);
   const connection = client({ name: "pi-claude-acp" })
     .onRequest("session/request_permission", ({ params }) => router.permission(params))
@@ -164,43 +171,71 @@ export async function openConnection(env: ConnectionEnv, log: Log): Promise<AcpC
         Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>,
       ),
     );
+  const kill = () => child.kill();
+  process.once("exit", kill);
   child.on("error", (error) => connection.close(error));
-  child.on("exit", () => connection.close());
+  void exited.then((error) => {
+    process.off("exit", kill);
+    connection.close(error);
+  });
+  /** A request that fails because the adapter died reports how it died. */
+  const explain = async (error: unknown): Promise<never> => {
+    throw connection.signal.aborted ? await exited : error;
+  };
   const initialized = await connection.agent
     .request("initialize", {
       protocolVersion: PROTOCOL_VERSION,
       clientCapabilities: { session: { compaction: {} } },
     })
-    .catch((error: unknown) => {
-      child.kill();
+    .catch(async (error: unknown) => {
+      kill();
       throw new Error(`El adaptador ACP no respondió: ${errorText(error)}\n${stderr()}`);
     });
   log(`adaptador iniciado: claude ${claudeVersion} (${exe})`);
   return {
-    agent: agentRequests(connection.agent),
+    agent: agentRequests(connection.agent, explain),
     claudeVersion,
-    supportsImages: initialized.agentCapabilities?.promptCapabilities?.image === true,
+    claudeExecutable: exe,
+    supportsImages: announcesImages(initialized),
     get closed() {
       return connection.signal.aborted;
     },
     listen: (sessionId, listener) => router.listen(sessionId, listener),
     close: () => {
       connection.close();
-      child.kill();
+      kill();
     },
   };
 }
 
-function agentRequests(agent: acp.ClientContext): AgentRequests {
+function announcesImages(initialized: acp.InitializeResponse): boolean {
+  return initialized.agentCapabilities?.promptCapabilities?.image === true;
+}
+
+function agentRequests(agent: acp.ClientContext, explain: (error: unknown) => Promise<never>): AgentRequests {
   return {
-    newSession: (params) => agent.request("session/new", params),
-    resumeSession: (params) => agent.request("session/resume", params),
-    closeSession: (params) => agent.request("session/close", params),
-    setSessionMode: (params) => agent.request("session/set_mode", params),
-    setSessionConfigOption: (params) => agent.request("session/set_config_option", params),
-    prompt: (params) => agent.request("session/prompt", params),
-    cancel: (params) => agent.notify("session/cancel", params),
+    newSession: (params) => agent.request("session/new", params).catch(explain),
+    resumeSession: (params) => agent.request("session/resume", params).catch(explain),
+    closeSession: (params) => agent.request("session/close", params).catch(explain),
+    setSessionMode: (params) => agent.request("session/set_mode", params).catch(explain),
+    setSessionConfigOption: (params) => agent.request("session/set_config_option", params).catch(explain),
+    prompt: (params) => agent.request("session/prompt", params).catch(explain),
+    cancel: (params) => agent.notify("session/cancel", params).catch(explain),
   };
+}
+
+/** Resolves when the adapter process ends, with its exit code or signal and the last stderr lines. */
+function exitError(child: ChildProcessWithoutNullStreams, stderr: () => string): Promise<Error> {
+  return new Promise((resolve) => {
+    child.once("close", (code, signal) => {
+      const how = code === null ? `señal ${signal}` : `código ${code}`;
+      resolve(new Error(`El adaptador ACP terminó (${how}).\n${lastLines(stderr(), STDERR_TAIL_LINES)}`));
+    });
+  });
+}
+
+function lastLines(text: string, count: number): string {
+  return text.trimEnd().split("\n").slice(-count).join("\n");
 }
 
 /** Keeps the last bytes of the adapter stderr in memory and copies all of it to the log. */

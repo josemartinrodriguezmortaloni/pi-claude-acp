@@ -14,6 +14,7 @@ import {
   EFFORT_CONFIG_ID,
   effortChange,
   MODEL_CONFIG_ID,
+  modelOptions,
   type ProbeSession,
 } from "./catalog.ts";
 import type { AcpConnection } from "./connection.ts";
@@ -29,8 +30,10 @@ const DEFAULT_MODE: SessionModeId = "default";
 const ASK_HOOK_COMMAND = `printf '%s' '${JSON.stringify({
   hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "ask" },
 })}'`;
-const RESUME_FAILED = "No se pudo reanudar la sesión de Claude Code; se abrió una sesión nueva.";
-const BRANCH_DIVERGED = "La rama de Pi cambió; se abrió una sesión nueva de Claude Code.";
+const RESUME_FAILED =
+  "No se pudo reanudar la sesión de Claude Code; se abrió una sesión nueva sin el historial previo.";
+const BRANCH_DIVERGED =
+  "La conversación de Pi cambió (rama, fork o edición); el contexto de Claude Code se reinició.";
 
 /**
  * Links a Pi session to its ACP session. Persisted with `pi.appendEntry`.
@@ -114,6 +117,8 @@ export class SessionStore {
   readonly #live = new Map<string, AcpSession>();
   readonly #records = new Map<string, SessionRecord>();
   readonly #used = new Set<string>();
+  /** Pi sessions whose latest record belongs to another Pi session: a fork. */
+  readonly #forked = new Set<string>();
   readonly #queues = new Map<string, Promise<unknown>>();
 
   constructor(private readonly deps: SessionDeps) {}
@@ -122,6 +127,7 @@ export class SessionStore {
   load(piSessionId: string, entries: SessionEntry[]): void {
     const data = latestRecordData(entries);
     if (isRecordOf(piSessionId, data)) this.#records.set(piSessionId, data);
+    else if (data !== undefined) this.#forked.add(piSessionId);
   }
 
   async ensure(
@@ -132,9 +138,17 @@ export class SessionStore {
   ): Promise<OpenedSession> {
     this.#used.add(piSessionId);
     const record = this.#records.get(piSessionId);
-    if (!diverged(record, branchHas)) return this.#reuse(conn, piSessionId, cwd, record);
+    if (!this.#diverged(piSessionId, record, branchHas)) return this.#reuse(conn, piSessionId, cwd, record);
     await this.#closeLive(piSessionId);
     return this.#fresh(conn, piSessionId, cwd, [BRANCH_DIVERGED]);
+  }
+
+  #diverged(
+    piSessionId: string,
+    record: SessionRecord | undefined,
+    branchHas: (leafId: string | null) => boolean,
+  ) {
+    return this.#forked.delete(piSessionId) || diverged(record, branchHas);
   }
 
   async #closeLive(piSessionId: string): Promise<void> {
@@ -327,11 +341,27 @@ async function setOption(session: AcpSession, configId: string, value: string): 
 
 /** Selects the model, then the offered effort closest to the Pi thinking level. */
 export async function applyConfig(session: AcpSession, modelId: string, level: ThinkingLevel | undefined) {
-  if (configValue(session.configOptions, MODEL_CONFIG_ID) !== modelId) {
-    await setOption(session, MODEL_CONFIG_ID, modelId);
-  }
+  if (configValue(session.configOptions, MODEL_CONFIG_ID) !== modelId) await switchModel(session, modelId);
   const effort = effortChange(session.configOptions, level);
   if (effort) await setOption(session, EFFORT_CONFIG_ID, effort);
+}
+
+/** Never continues with another model: an unoffered or unapplied model is an error. */
+async function switchModel(session: AcpSession, modelId: string): Promise<void> {
+  requireOffered(session, modelId);
+  await setOption(session, MODEL_CONFIG_ID, modelId);
+  if (configValue(session.configOptions, MODEL_CONFIG_ID) === modelId) return;
+  throw new Error(`Claude Code no aplicó el modelo ${modelId}.`);
+}
+
+function requireOffered(session: AcpSession, modelId: string): void {
+  const offered = modelOptions(session.configOptions).map((option) => option.value);
+  if (offered.includes(modelId)) return;
+  const { claudeVersion, claudeExecutable } = session.conn;
+  throw new Error(
+    `Claude Code ${claudeVersion} (${claudeExecutable}) no ofrece el modelo ${modelId}. ` +
+      `Modelos disponibles: ${offered.join(", ")}.`,
+  );
 }
 
 export function skillsFromCommands(commands: SlashCommandInfo[]): SkillInfo[] {

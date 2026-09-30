@@ -1,9 +1,11 @@
 import { chmod, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   type AcpConnection,
+  openConnection,
   resolveExecutable,
   SessionRouter,
   sharedConnection,
@@ -17,6 +19,54 @@ async function script(name: string, body: string): Promise<string> {
   await chmod(path, 0o755);
   return path;
 }
+
+const FAKE_ADAPTER = join(dirname(fileURLToPath(import.meta.url)), "fixtures/fake-adapter.mjs");
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function fakeAdapter() {
+  const exe = await script("claude", 'echo "2.1.285 (Claude Code)"');
+  const logged: string[] = [];
+  const conn = await openConnection(
+    { CLAUDE_CODE_EXECUTABLE: exe },
+    (line) => logged.push(line),
+    FAKE_ADAPTER,
+  );
+  const pid = Number(/pid:(\d+)/.exec(logged.join(""))?.[1]);
+  return { conn, logged, pid };
+}
+
+describe("openConnection with an adapter process", () => {
+  it("C2: fails a request with the exit code and the last stderr lines when the adapter dies, then reports closed", async () => {
+    const { conn } = await fakeAdapter();
+    const { sessionId } = await conn.agent.newSession({ cwd: "/", mcpServers: [] });
+    const error = (await conn.agent.prompt({ sessionId, prompt: [] }).catch((e: unknown) => e)) as Error;
+    expect(error.message).toContain("código 3");
+    expect(error.message).toContain("fatal: boom");
+    expect(conn.closed).toBe(true);
+  });
+
+  it("C4: copies the adapter stderr to the extension log", async () => {
+    const { conn, logged, pid } = await fakeAdapter();
+    expect(logged.join("")).toContain(`pid:${pid}`);
+    conn.close();
+  });
+
+  it("C5: close terminates the adapter process", async () => {
+    const { conn, pid } = await fakeAdapter();
+    expect(alive(pid)).toBe(true);
+    conn.close();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(alive(pid)).toBe(false);
+  });
+});
 
 describe("validateExecutable", () => {
   it("accepts a binary whose --version prints the Claude Code line", async () => {
@@ -32,11 +82,11 @@ describe("validateExecutable", () => {
     expect((error as Error).message).toContain("mise: activating");
   });
 
-  it("rejects a path that does not exist", async () => {
+  it("C1: rejects a path that does not exist", async () => {
     await expect(validateExecutable("/nonexistent/claude")).rejects.toThrow("/nonexistent/claude");
   });
 
-  it("rejects a file that is not executable", async () => {
+  it("C1: rejects a file that is not executable", async () => {
     const exe = await script("claude", 'echo "2.1.285 (Claude Code)"');
     await chmod(exe, 0o644);
     await expect(validateExecutable(exe)).rejects.toThrow(exe);

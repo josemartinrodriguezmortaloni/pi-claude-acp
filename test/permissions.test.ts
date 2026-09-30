@@ -51,7 +51,7 @@ function setup(options: { votes?: Vote[]; ui?: string | undefined | "none"; sign
 const selected = (optionId: string) => ({ outcome: { outcome: "selected", optionId } });
 const cancelled = { outcome: { outcome: "cancelled" } };
 
-describe("C30: decide combines validator votes", () => {
+describe("C23/C30: decide combines validator votes", () => {
   it("rejects when any validator denies, without asking the user", async () => {
     const { ctx, shown } = setup({ votes: ["allow", "deny", "ask"], ui: "Permitir" });
     await expect(decide(REQUEST, ctx)).resolves.toEqual(selected("reject"));
@@ -77,7 +77,7 @@ describe("C30: decide combines validator votes", () => {
     expect(shown[0]?.title).toContain("rm -rf build");
   });
 
-  it("rejects when nobody decides and Pi has no UI", async () => {
+  it("C24: rejects when nobody decides and Pi has no UI", async () => {
     const { ctx } = setup({ ui: "none" });
     await expect(decide(REQUEST, ctx)).resolves.toEqual(selected("reject"));
   });
@@ -119,7 +119,7 @@ describe("decide during cancellation", () => {
     await expect(decision).resolves.toEqual(cancelled);
   });
 
-  it("answers cancelled when the turn is already cancelled", async () => {
+  it("C25: answers cancelled when the turn is already cancelled", async () => {
     const controller = new AbortController();
     controller.abort();
     const { ctx, shown } = setup({ ui: "Permitir", signal: controller.signal });
@@ -127,7 +127,7 @@ describe("decide during cancellation", () => {
     expect(shown).toEqual([]);
   });
 
-  it("answers cancelled when the turn is cancelled while the dialog is open", async () => {
+  it("C25: answers cancelled when the turn is cancelled while the dialog is open", async () => {
     const controller = new AbortController();
     const events = createEventBus();
     const ctx: DecideContext = {
