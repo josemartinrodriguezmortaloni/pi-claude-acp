@@ -307,9 +307,18 @@ function rawText(raw: unknown): string {
 
 function withResult(mark: string, output: string): string {
   if (!output) return mark;
-  const result = truncateResult(output);
+  const { language, body } = unfence(output);
+  const result = truncateResult(body);
   const fence = fenceFor(result);
-  return `${mark}\n\n${fence}\n${result}\n${fence}`;
+  return `${mark}\n\n${fence}${language}\n${result}\n${fence}`;
+}
+
+/** claude-agent-acp already wraps command output in a fence (renderer.js:206); its content is re-fenced here. */
+const OUTER_FENCE = /^(`{3,})([^\n`]*)\n([\s\S]*)\n\1$/;
+
+function unfence(text: string): { language: string; body: string } {
+  const match = OUTER_FENCE.exec(text.trim());
+  return match ? { language: String(match[2]), body: String(match[3]) } : { language: "", body: text };
 }
 
 /** CommonMark closes a fence only with at least as many backticks, so ours outgrows every run inside. */

@@ -163,6 +163,28 @@ describe("streamPrompt: content", () => {
     expect(output).not.toContain("in_progress");
   });
 
+  it("C17: replaces the adapter's own fence around a tool result instead of nesting it", async () => {
+    const h = harness();
+    script(
+      h.conn,
+      [
+        { sessionUpdate: "tool_call", toolCallId: "t1", title: "Terminal" },
+        {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "t1",
+          status: "completed",
+          content: [
+            { type: "content", content: { type: "text", text: "```console\n.gitignore\nTASKS.md\n```" } },
+          ],
+        },
+      ],
+      { stopReason: "end_turn" },
+    );
+    const output = finalText(await h.run([user("listá")]));
+    expect(output).toContain("✓ completed\n\n```console\n.gitignore\nTASKS.md\n```");
+    expect(output).not.toContain("````");
+  });
+
   it("C17: fences a tool result with more backticks than it contains, so its fences cannot close ours", async () => {
     const h = harness();
     const markdown = "# Doc\n```mermaid\nflowchart LR\n```";
