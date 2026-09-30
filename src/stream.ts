@@ -290,7 +290,16 @@ function rawText(raw: unknown): string {
 }
 
 function withResult(mark: string, output: string): string {
-  return output ? `${mark}\n\n\`\`\`\n${truncateResult(output)}\n\`\`\`` : mark;
+  if (!output) return mark;
+  const result = truncateResult(output);
+  const fence = fenceFor(result);
+  return `${mark}\n\n${fence}\n${result}\n${fence}`;
+}
+
+/** CommonMark closes a fence only with at least as many backticks, so ours outgrows every run inside. */
+function fenceFor(text: string): string {
+  const runs = (text.match(/`+/g) ?? []).map((run) => run.length);
+  return "`".repeat(Math.max(3, ...runs.map((length) => length + 1)));
 }
 
 /** First lines of a tool result; "…" marks a cut inside them and the count names the lines after them. */

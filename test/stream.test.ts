@@ -156,6 +156,28 @@ describe("streamPrompt: content", () => {
     expect(output).not.toContain("in_progress");
   });
 
+  it("C17: fences a tool result with more backticks than it contains, so its fences cannot close ours", async () => {
+    const h = harness();
+    const markdown = "# Doc\n```mermaid\nflowchart LR\n```";
+    script(
+      h.conn,
+      [
+        { sessionUpdate: "tool_call", toolCallId: "t1", title: "Read spec.md" },
+        {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "t1",
+          status: "completed",
+          content: [{ type: "content", content: { type: "text", text: markdown } }],
+        },
+        text("Listo."),
+      ],
+      { stopReason: "end_turn" },
+    );
+    const output = finalText(await h.run([user("leé")]));
+    expect(output).toContain(`\`\`\`\`\n${markdown}\n\`\`\`\``);
+    expect(output).toMatch(/````\n\nListo\.$/);
+  });
+
   it("C17: shows the plan as a checklist each time it changes", async () => {
     const h = harness();
     const plan = (status: "pending" | "completed"): SessionUpdate => ({
