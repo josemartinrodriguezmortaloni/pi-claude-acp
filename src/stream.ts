@@ -135,7 +135,7 @@ async function promptTurn(
   const costBefore = session.costTotal;
   const unlisten = session.conn.listen(session.id, {
     update: (update) => push(handleUpdate(update, state, session, deps)),
-    permission: (request) => deps.decide(request, signal),
+    permission: (request) => decideLogged(request, signal, deps),
   });
   const stopCancelling = onAbort(signal, () => {
     session.conn.agent.cancel({ sessionId: session.id }).catch((error: unknown) => {
@@ -151,6 +151,22 @@ async function promptTurn(
     unlisten();
     stopCancelling();
   }
+}
+
+/** Every permission request and its answer go to the log: a pending one is what hangs a turn. */
+async function decideLogged(
+  request: acp.RequestPermissionRequest,
+  signal: AbortSignal | undefined,
+  deps: StreamDeps,
+): Promise<acp.RequestPermissionResponse> {
+  const tool = request.toolCall.title ?? request.toolCall.toolCallId;
+  deps.log(`permiso pedido: ${tool}`);
+  const response = await deps.decide(request, signal);
+  const outcome = response.outcome;
+  deps.log(
+    `permiso respondido: ${tool} → ${outcome.outcome === "selected" ? outcome.optionId : "cancelled"}`,
+  );
+  return response;
 }
 
 /** Runs `action` once if `signal` aborts; the returned function stops watching. */

@@ -96,18 +96,29 @@ function unanimousAllow(votes: Vote[]): boolean {
   return votes.length > 0 && votes.every((vote) => vote === "allow");
 }
 
+/**
+ * Pi keeps one dialog: a new `select` replaces the open one and never resolves it
+ * (pi-coding-agent/dist/modes/interactive/interactive-mode.js:2034). Parallel tool calls would orphan a
+ * permission request and hang the turn, so dialogs wait for each other.
+ */
+let openDialog: Promise<unknown> = Promise.resolve();
+
 async function askUser(
   ctx: DecideContext,
   toolCall: ToolCallUpdate,
   options: PermissionOption[],
 ): Promise<RequestPermissionResponse> {
-  if (!ctx.ui) return choose(options, "reject_once");
-  const label = await ctx.ui.select(
-    dialogTitle(toolCall),
-    options.map((option) => option.name),
-    { signal: ctx.signal },
+  const ui = ctx.ui;
+  if (!ui) return choose(options, "reject_once");
+  const label = openDialog.then(() =>
+    ui.select(
+      dialogTitle(toolCall),
+      options.map((option) => option.name),
+      { signal: ctx.signal },
+    ),
   );
-  return answerFor(ctx, options, label);
+  openDialog = label.catch(() => undefined);
+  return answerFor(ctx, options, await label);
 }
 
 function answerFor(ctx: DecideContext, options: PermissionOption[], label: string | undefined) {

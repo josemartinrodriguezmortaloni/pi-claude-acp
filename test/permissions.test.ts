@@ -109,6 +109,41 @@ describe("C31: allow_always options", () => {
   });
 });
 
+/**
+ * Mimics Pi's interactive selector (interactive-mode.js:2034): a new dialog replaces the open one and the
+ * replaced dialog's promise never resolves.
+ */
+function piLikeUi() {
+  let open: { title: string; answer: (label: string) => void } | undefined;
+  const ui = {
+    select: (title: string) =>
+      new Promise<string | undefined>((resolve) => {
+        open = { title, answer: resolve };
+      }),
+  };
+  const answerOpen = async (label: string) => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const current = open;
+    open = undefined;
+    current?.answer(label);
+    return current?.title;
+  };
+  return { ui, answerOpen };
+}
+
+describe("parallel permission requests", () => {
+  it("shows one Pi dialog at a time, so a second request cannot orphan the first", async () => {
+    const { ui, answerOpen } = piLikeUi();
+    const ctx: DecideContext = { events: createEventBus(), ui };
+    const read = { ...REQUEST, toolCall: { toolCallId: "t1", title: "Read a.ts" } };
+    const bash = { ...REQUEST, toolCall: { toolCallId: "t2", title: "Bash ls" } };
+    const decisions = Promise.all([decide(read, ctx), decide(bash, ctx)]);
+    expect(await answerOpen("Permitir")).toContain("Read a.ts");
+    expect(await answerOpen("Rechazar")).toContain("Bash ls");
+    await expect(decisions).resolves.toEqual([selected("allow"), selected("reject")]);
+  });
+});
+
 describe("decide during cancellation", () => {
   it("answers cancelled when the turn is cancelled while a validator is still voting", async () => {
     const controller = new AbortController();
