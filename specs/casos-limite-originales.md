@@ -6,7 +6,7 @@ Fuente: especificación original de `pi-claude-acp`, provista por el usuario el 
 
 1. CLAUDE_CODE_EXECUTABLE no existe o no es ejecutable: error antes de lanzar el adaptador, con la ruta probada.
 2. El adaptador no arranca o termina a mitad de un stream: el stream en curso termina con un evento de error que incluye el código de salida y las últimas líneas de stderr del adaptador; las sesiones de esa conexión se marcan inválidas y la próxima request relanza la conexión.
-3. Claude Code sin login o el adaptador pide autenticación: error que indica iniciar sesión ejecutando `claude` en una terminal. La extensión no implementa login ni maneja credenciales.
+3. Claude Code sin login o el adaptador pide autenticación: aviso al iniciar la sesión de Pi y, si el turno falla, error que indica ejecutar `/claude-login`. El comando le cede la terminal a `claude auth login`; el login lo hace el binario y la extensión no maneja credenciales.
 4. La extensión no escribe en stdout ni stderr del proceso de Pi, porque rompe la TUI. El stderr del adaptador va a un buffer acotado y a un archivo de log de la extensión.
 5. Pi se cierra o descarga la extensión: el proceso del adaptador termina sin dejar procesos huérfanos.
 

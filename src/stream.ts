@@ -14,13 +14,12 @@ import {
   type UserMessage,
 } from "@earendil-works/pi-ai";
 import { type AcpConnection, errorText, type Log } from "./connection.ts";
+import { LOGIN_HINT } from "./login.ts";
 import type { AcpSession, OpenTurn, TurnRequest } from "./sessions.ts";
 
 const MAX_RESULT_LINES = 5;
 const MAX_RESULT_CHARS = 400;
 const AUTH_REQUIRED_CODE = -32000;
-const LOGIN_HINT =
-  "Claude Code no tiene una sesión iniciada. Iniciá sesión ejecutando `claude` en una terminal.";
 const TOOL_MARKS: Record<string, string> = { completed: "✓ completed", failed: "✗ failed" };
 /** Distinct shapes, so the status reads without color. */
 const PLAN_MARKS: Record<acp.PlanEntryStatus, string> = { completed: "✓", in_progress: "›", pending: "·" };

@@ -373,9 +373,7 @@ describe("streamPrompt: end of turn", () => {
     const h = harness();
     h.conn.promptError = RequestError.authRequired();
     const last = (await h.run([user("hola")])).at(-1);
-    expect(last?.type === "error" && last.error.errorMessage).toContain(
-      "ejecutando `claude` en una terminal",
-    );
+    expect(last?.type === "error" && last.error.errorMessage).toContain("/claude-login");
   });
 
   it("C15: ends with an error and never prompts when the selected model is not offered", async () => {

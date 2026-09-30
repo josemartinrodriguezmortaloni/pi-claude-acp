@@ -380,8 +380,14 @@ export function branchContains(manager: { getBranch(): SessionEntry[] }) {
     leafId === null || manager.getBranch().some((entry) => entry.id === leafId);
 }
 
-export function shouldCancelCompaction(model: { provider: string } | undefined): boolean {
+/** Whether the active Pi model runs through this extension. */
+export function usesClaudeAcp(model: { provider: string } | undefined): boolean {
   return model?.provider === PROVIDER_ID;
+}
+
+/** Claude Code compacts its own history, so Pi's compaction would summarize a transcript it never sends. */
+export function shouldCancelCompaction(model: { provider: string } | undefined): boolean {
+  return usesClaudeAcp(model);
 }
 
 interface PiMcpServer {

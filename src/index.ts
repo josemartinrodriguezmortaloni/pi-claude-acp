@@ -4,6 +4,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Catalog } from "./catalog.ts";
 import { adapterConnection, createLog, type Log, type SharedConnection } from "./connection.ts";
 import { answerElicitation } from "./elicitation.ts";
+import { attachToTerminal, LOGIN_COMMAND, type LoginDeps, login, warnIfLoggedOut } from "./login.ts";
 import { decide } from "./permissions.ts";
 import {
   branchContains,
@@ -20,6 +21,7 @@ import {
 import { type StreamDeps, streamPrompt } from "./stream.ts";
 
 const CATALOG_TIMEOUT_MS = 15_000;
+const AUTH_STATUS_TIMEOUT_MS = 5_000;
 const PLAN_WIDGET = "claude-acp-plan";
 /** Pi requires an auth method; Claude Code uses its own login, so this constant is not a secret. */
 const AUTH_PLACEHOLDER = "claude-code-login";
@@ -68,6 +70,12 @@ export async function registerClaudeAcp(
     noteCompaction: (session, update) => store.noteCompaction(session, update),
     log,
   };
+  const loginDeps: LoginDeps = {
+    executable: async () => (await adapter.get()).claudeExecutable,
+    capture: (command, args) => pi.exec(command, args, { timeout: AUTH_STATUS_TIMEOUT_MS }),
+    attach: attachToTerminal,
+    restartAdapter: () => adapter.close(),
+  };
   const openCatalogProbe = async () => openProbe(store, await adapter.get(), process.cwd());
   const loadCatalog = () => catalog.load(openCatalogProbe, CATALOG_TIMEOUT_MS);
 
@@ -91,12 +99,19 @@ export async function registerClaudeAcp(
   if (startupError) log(startupError);
   register(catalog.models);
 
+  pi.registerCommand(LOGIN_COMMAND, {
+    description: "Inicia sesión en Claude Code con su propio login",
+    handler: (_args, current) => login(current, loginDeps),
+  });
+
   pi.on("session_start", (_event, current) => {
     ctx = current;
     store.load(current.sessionManager.getSessionId(), current.sessionManager.getEntries());
     void catalog
       .ensureLoaded(openCatalogProbe, CATALOG_TIMEOUT_MS)
       .then((error) => error && current.ui.notify(error, "error"));
+    // A failed adapter start is already reported by the catalog load above.
+    void warnIfLoggedOut(current, loginDeps).catch(() => undefined);
   });
   pi.on("session_shutdown", (event, current) => {
     current.ui.setWidget(PLAN_WIDGET, undefined);

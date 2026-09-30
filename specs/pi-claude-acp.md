@@ -39,6 +39,7 @@ src/
 ├── catalog.ts      # configOptions model/effort → Model de Pi                   ← cambia si cambia el formato de modelos del adaptador
 ├── stream.ts       # session/update → AssistantMessageEvent                     ← cambia si cambia el contrato de stream de Pi o de ACP
 ├── permissions.ts  # request_permission → puente pi.events + UI de Pi           ← cambia si cambia el contrato de validación
+├── login.ts        # claude auth status/login → aviso y comando /claude-login    ← cambia si cambia la CLI de autenticación de Claude Code
 └── index.ts        # registerProvider y handlers de eventos; sin lógica propia
 ```
 
@@ -163,7 +164,7 @@ Los 25 casos de la especificación original se mantienen, con estos ajustes:
 
 | Caso | Ajuste |
 | --- | --- |
-| 3 | Sin login, `prompt` falla con `-32000 Authentication required` (`acp-agent.js:2784-2788`); `newSession` no lo detecta. Error: iniciar sesión ejecutando `claude` en una terminal |
+| 3 | Sin login, `prompt` falla con `-32000 Authentication required` (`acp-agent.js:2784-2788`); `newSession` no lo detecta. `session_start` consulta `claude auth status --json` y avisa; el error del turno indica `/claude-login`, que corre `claude auth login` en la terminal de Pi y reinicia el adaptador |
 | 6 | Mecanismo: `pi.appendEntry` + `resumeSession` |
 | 10 | Distinguible por `options.sessionId`; sesión descartable + cancelación de compactación |
 | 11 | Factory async bloqueante, timeout 15 s, `persistSession: false` |
@@ -181,6 +182,10 @@ Casos nuevos, cada uno con test:
 - **C31** — `permissions.ts`: las opciones `allow_always` no llegan a la UI.
 - **C32** — `catalog.ts`: un cambio en la lista de modelos de una sesión nueva vuelve a registrar el provider.
 - **C33** — `connection.ts`: un ejecutable cuyo `--version` no coincide (wrapper) se rechaza con ruta y salida.
+- **C34** — `login.ts`: con un modelo `claude-acp` y `loggedIn: false`, `session_start` avisa con `/claude-login`; con otro provider no consulta el binario.
+- **C35** — `login.ts`: `/claude-login` detiene la TUI, corre `claude auth login` con la terminal de Pi y reanuda la TUI.
+- **C36** — `login.ts`: tras un login confirmado por `auth status`, el adaptador se reinicia; sin login confirmado, no.
+- **C37** — `login.ts`: fuera de la TUI, `/claude-login` no corre nada e indica `claude auth login` en una terminal.
 
 ## 7. Verificación
 

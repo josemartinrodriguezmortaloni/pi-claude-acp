@@ -7,18 +7,25 @@ import { FakeConnection } from "./fake-connection.ts";
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
 
-function fakePi() {
+function fakePi(authStatus = '{"loggedIn": true}') {
   const providers: ProviderConfig[] = [];
   const handlers = new Map<string, Handler>();
   const entries: { customType: string; data: unknown }[] = [];
+  const commands = new Map<string, { description?: string }>();
+  const executed: string[] = [];
   const pi = {
     registerProvider: (_name: string, config: ProviderConfig) => providers.push(config),
+    registerCommand: (name: string, options: { description?: string }) => commands.set(name, options),
     on: (event: string, handler: Handler) => handlers.set(event, handler),
     appendEntry: (customType: string, data: unknown) => entries.push({ customType, data }),
     getCommands: () => [],
+    exec: async (command: string, args: string[]) => {
+      executed.push(`${command} ${args.join(" ")}`);
+      return { stdout: authStatus, stderr: "", code: 0, killed: false };
+    },
     events: createEventBus(),
   } as unknown as ExtensionAPI;
-  return { pi, providers, handlers, entries };
+  return { pi, providers, handlers, entries, commands, executed };
 }
 
 function fakeCtx(notified: string[] = []) {
@@ -49,8 +56,8 @@ function adapter(conn: AcpConnection | Error): SharedConnection & { closes: numb
   };
 }
 
-async function setup(conn: AcpConnection | Error = new FakeConnection()) {
-  const fake = fakePi();
+async function setup(conn: AcpConnection | Error = new FakeConnection(), authStatus?: string) {
+  const fake = fakePi(authStatus);
   const shared = adapter(conn);
   await registerClaudeAcp(fake.pi, { adapter: shared, agentDir: "/nonexistent", log: () => {} });
   return { ...fake, shared };
@@ -74,6 +81,20 @@ describe("registerClaudeAcp", () => {
     handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, fakeCtx(notified));
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(notified[0]).toContain("sin claude");
+  });
+
+  it("C34: warns on session start when Claude Code has no login", async () => {
+    const { handlers, executed } = await setup(new FakeConnection(), '{"loggedIn": false}');
+    const notified: string[] = [];
+    handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, fakeCtx(notified));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(executed).toEqual(["/opt/claude auth status --json"]);
+    expect(notified).toEqual([expect.stringContaining("/claude-login")]);
+  });
+
+  it("registers /claude-login", async () => {
+    const { commands } = await setup();
+    expect(commands.get("claude-login")?.description).toContain("Claude Code");
   });
 
   it("C6: persists the ACP session after each turn", async () => {

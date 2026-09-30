@@ -17,6 +17,7 @@ Referencia: [specs/pi-claude-acp.md](specs/pi-claude-acp.md).
 - [x] Un diálogo de Pi por vez (`dialogs.ts`): permisos en paralelo dejaban un diálogo huérfano y el turno trabado.
 - [x] AskUserQuestion vía elicitación ACP (`elicitation.ts`): el cliente anuncia `elicitation.form` y las preguntas usan los diálogos de Pi.
 - [x] Plan de Claude Code como widget en vivo arriba del editor, en lugar de texto en el transcript.
+- [x] Login de Claude Code (`login.ts`): aviso en `session_start` si no hay login y comando `/claude-login` que corre `claude auth login` en la terminal de Pi (C34-C37).
 
 ## Pendiente
 
