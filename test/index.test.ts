@@ -26,7 +26,7 @@ function fakeCtx(notified: string[] = []) {
     cwd: "/work",
     hasUI: false,
     model: { provider: "claude-acp" },
-    ui: { notify: (message: string) => notified.push(message) },
+    ui: { notify: (message: string) => notified.push(message), setWidget: () => {} },
     sessionManager: {
       getSessionId: () => "pi-1",
       getEntries: () => [],

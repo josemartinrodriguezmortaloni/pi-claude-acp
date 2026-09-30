@@ -114,6 +114,7 @@ describe("SessionRouter", () => {
   const listener = (updates: string[]) => ({
     update: (u: { sessionUpdate: string }) => updates.push(u.sessionUpdate),
     permission: async () => ({ outcome: { outcome: "selected" as const, optionId: "allow" } }),
+    elicit: async () => ({ action: "accept" as const, content: { a: "b" } }),
   });
 
   it("delivers updates only to the listener of their session", () => {
@@ -125,6 +126,15 @@ describe("SessionRouter", () => {
     router.update({ sessionId: "b", update: { sessionUpdate: "plan", entries: [] } });
     expect(a).toEqual(["plan"]);
     expect(logged).toHaveLength(1);
+  });
+
+  it("routes a session elicitation to its listener and cancels one nobody listens to", async () => {
+    const router = new SessionRouter(() => {});
+    router.listen("a", listener([]));
+    const ask = (sessionId: string) =>
+      router.elicitation({ mode: "form", sessionId, message: "?", requestedSchema: { type: "object" } });
+    await expect(ask("a")).resolves.toEqual({ action: "accept", content: { a: "b" } });
+    await expect(ask("b")).resolves.toEqual({ action: "cancel" });
   });
 
   it("answers cancelled to a permission request of a session nobody listens to", async () => {

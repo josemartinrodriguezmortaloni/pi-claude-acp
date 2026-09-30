@@ -14,8 +14,13 @@ Referencia: [specs/pi-claude-acp.md](specs/pi-claude-acp.md).
 - [x] Smoke test real (`bun run smoke`) y carga en Pi (`pi -e ./src/index.ts`).
 - [x] Los 25 casos de [specs/casos-limite-originales.md](specs/casos-limite-originales.md) y C26-C33 con test (`C<n>` en el nombre).
 - [x] Catálogo por aprendizaje de effort (opción A, confirmada por el usuario).
+- [x] Un diálogo de Pi por vez (`dialogs.ts`): permisos en paralelo dejaban un diálogo huérfano y el turno trabado.
+- [x] AskUserQuestion vía elicitación ACP (`elicitation.ts`): el cliente anuncia `elicitation.form` y las preguntas usan los diálogos de Pi.
+- [x] Plan de Claude Code como widget en vivo arriba del editor, en lugar de texto en el transcript.
 
 ## Pendiente
+
+- [ ] Rediseño del transcript (PRODUCT.md): una línea por herramienta dentro de citas, título final, contenido solo en comandos y fallos, progreso en la línea de trabajo.
 
 - [ ] Plugin validador en TS contra el contrato de §5.5 (fuera de alcance, otra sesión).
 - [ ] Plugin de self-compact: toma `session_before_compact` y se quita el handler de `index.ts`.

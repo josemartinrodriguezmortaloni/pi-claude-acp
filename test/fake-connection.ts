@@ -109,6 +109,10 @@ export class FakeConnection implements AcpConnection {
     return this.#router.permission(request);
   }
 
+  elicit(request: acp.CreateElicitationRequest): Promise<acp.CreateElicitationResponse> {
+    return this.#router.elicitation(request);
+  }
+
   /** Resolves on the next session/cancel notification. */
   untilCancel(): Promise<void> {
     return new Promise((resolve) => this.#cancelWaiters.push(resolve));

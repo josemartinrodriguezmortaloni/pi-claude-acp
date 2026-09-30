@@ -26,6 +26,7 @@ export interface ConnectionEnv {
 export interface SessionListener {
   update(update: acp.SessionUpdate): void;
   permission(request: acp.RequestPermissionRequest): Promise<acp.RequestPermissionResponse>;
+  elicit(request: acp.CreateElicitationRequest): Promise<acp.CreateElicitationResponse>;
 }
 
 /** The agent-side ACP methods the extension calls. */
@@ -77,6 +78,13 @@ export class SessionRouter {
     const listener = this.#listeners.get(request.sessionId);
     if (!listener) return Promise.resolve({ outcome: { outcome: "cancelled" } });
     return listener.permission(request);
+  }
+
+  /** Only session-scoped elicitations reach a turn; request-scoped ones have no listener. */
+  elicitation(request: acp.CreateElicitationRequest): Promise<acp.CreateElicitationResponse> {
+    const listener = this.#listeners.get(String((request as { sessionId?: string }).sessionId));
+    if (!listener) return Promise.resolve({ action: "cancel" });
+    return listener.elicit(request);
   }
 }
 
@@ -164,6 +172,7 @@ export async function openConnection(
   const router = new SessionRouter(log);
   const connection = client({ name: "pi-claude-acp" })
     .onRequest("session/request_permission", ({ params }) => router.permission(params))
+    .onRequest("elicitation/create", ({ params }) => router.elicitation(params))
     .onNotification("session/update", ({ params }) => router.update(params))
     .connect(
       ndJsonStream(
@@ -185,7 +194,7 @@ export async function openConnection(
   const initialized = await connection.agent
     .request("initialize", {
       protocolVersion: PROTOCOL_VERSION,
-      clientCapabilities: { session: { compaction: {} } },
+      clientCapabilities: { session: { compaction: {} }, elicitation: { form: {} } },
     })
     .catch(async (error: unknown) => {
       kill();

@@ -3,6 +3,7 @@ import type { ExtensionAPI, ExtensionContext, ProviderModelConfig } from "@earen
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Catalog } from "./catalog.ts";
 import { adapterConnection, createLog, type Log, type SharedConnection } from "./connection.ts";
+import { answerElicitation } from "./elicitation.ts";
 import { decide } from "./permissions.ts";
 import {
   branchContains,
@@ -19,6 +20,7 @@ import {
 import { type StreamDeps, streamPrompt } from "./stream.ts";
 
 const CATALOG_TIMEOUT_MS = 15_000;
+const PLAN_WIDGET = "claude-acp-plan";
 /** Pi requires an auth method; Claude Code uses its own login, so this constant is not a secret. */
 const AUTH_PLACEHOLDER = "claude-code-login";
 
@@ -60,6 +62,8 @@ export async function registerClaudeAcp(
     },
     decide: (request, signal) =>
       decide(request, { events: pi.events, ui: ctx?.hasUI ? ctx.ui : undefined, signal }),
+    elicit: (request, signal) => answerElicitation(request, { ui: ctx?.hasUI ? ctx.ui : undefined, signal }),
+    showPlan: (lines) => ctx?.ui.setWidget(PLAN_WIDGET, lines),
     onContextWindow: (modelId, size) => catalog.setContextWindow(modelId, size),
     noteCompaction: (session, update) => store.noteCompaction(session, update),
     log,
@@ -94,7 +98,8 @@ export async function registerClaudeAcp(
       .ensureLoaded(openCatalogProbe, CATALOG_TIMEOUT_MS)
       .then((error) => error && current.ui.notify(error, "error"));
   });
-  pi.on("session_shutdown", (event) => {
+  pi.on("session_shutdown", (event, current) => {
+    current.ui.setWidget(PLAN_WIDGET, undefined);
     ctx = undefined;
     if (event.reason === "quit" || event.reason === "reload") adapter.close();
   });

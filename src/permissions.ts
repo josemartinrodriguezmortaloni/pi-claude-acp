@@ -6,6 +6,7 @@ import type {
   ToolCallUpdate,
 } from "@agentclientprotocol/sdk";
 import type { EventBus, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { oneAtATime } from "./dialogs.ts";
 
 /** Channel on `pi.events` where validator plugins vote on each Claude Code tool call. */
 export const TOOL_REQUEST_EVENT = "claude-acp:tool-request";
@@ -96,13 +97,6 @@ function unanimousAllow(votes: Vote[]): boolean {
   return votes.length > 0 && votes.every((vote) => vote === "allow");
 }
 
-/**
- * Pi keeps one dialog: a new `select` replaces the open one and never resolves it
- * (pi-coding-agent/dist/modes/interactive/interactive-mode.js:2034). Parallel tool calls would orphan a
- * permission request and hang the turn, so dialogs wait for each other.
- */
-let openDialog: Promise<unknown> = Promise.resolve();
-
 async function askUser(
   ctx: DecideContext,
   toolCall: ToolCallUpdate,
@@ -110,15 +104,14 @@ async function askUser(
 ): Promise<RequestPermissionResponse> {
   const ui = ctx.ui;
   if (!ui) return choose(options, "reject_once");
-  const label = openDialog.then(() =>
+  const label = await oneAtATime(() =>
     ui.select(
       dialogTitle(toolCall),
       options.map((option) => option.name),
       { signal: ctx.signal },
     ),
   );
-  openDialog = label.catch(() => undefined);
-  return answerFor(ctx, options, await label);
+  return answerFor(ctx, options, label);
 }
 
 function answerFor(ctx: DecideContext, options: PermissionOption[], label: string | undefined) {

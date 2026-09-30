@@ -22,11 +22,8 @@ const AUTH_REQUIRED_CODE = -32000;
 const LOGIN_HINT =
   "Claude Code no tiene una sesión iniciada. Iniciá sesión ejecutando `claude` en una terminal.";
 const TOOL_MARKS: Record<string, string> = { completed: "✓ completed", failed: "✗ failed" };
-const PLAN_LINES: Record<acp.PlanEntryStatus, (content: string) => string> = {
-  completed: (content) => `- [x] ${content}`,
-  in_progress: (content) => `- [ ] ${content} (en curso)`,
-  pending: (content) => `- [ ] ${content}`,
-};
+/** Distinct shapes, so the status reads without color. */
+const PLAN_MARKS: Record<acp.PlanEntryStatus, string> = { completed: "✓", in_progress: "›", pending: "·" };
 
 type BlockKind = "text" | "thinking";
 
@@ -34,7 +31,6 @@ export interface TurnState {
   readonly message: AssistantMessage;
   open?: { index: number; block: TextContent | ThinkingContent };
   readonly finishedTools: Set<string>;
-  plan?: string;
 }
 
 export interface StreamDeps {
@@ -44,6 +40,9 @@ export interface StreamDeps {
     task: (turn: OpenTurn) => Promise<T>,
   ): Promise<T>;
   decide(request: acp.RequestPermissionRequest, signal?: AbortSignal): Promise<acp.RequestPermissionResponse>;
+  elicit(request: acp.CreateElicitationRequest, signal?: AbortSignal): Promise<acp.CreateElicitationResponse>;
+  /** Shows Claude Code's plan as a live widget; undefined clears it. */
+  showPlan(lines: string[] | undefined): void;
   onContextWindow(modelId: string, size: number): void;
   noteCompaction(session: AcpSession, update: acp.CompactionUpdate): void;
   log: Log;
@@ -136,6 +135,7 @@ async function promptTurn(
   const unlisten = session.conn.listen(session.id, {
     update: (update) => push(handleUpdate(update, state, session, deps)),
     permission: (request) => decideLogged(request, signal, deps),
+    elicit: (request) => deps.elicit(request, signal),
   });
   const stopCancelling = onAbort(signal, () => {
     session.conn.agent.cancel({ sessionId: session.id }).catch((error: unknown) => {
@@ -189,6 +189,7 @@ const SESSION_EFFECTS: { [K in acp.SessionUpdate["sessionUpdate"]]?: SessionEffe
     deps.onContextWindow(state.message.model, update.size);
   },
   compaction_update: (update, _state, session, deps) => deps.noteCompaction(session, update),
+  plan: (update, _state, _session, deps) => deps.showPlan(planWidget(update.entries)),
 };
 
 function handleUpdate(
@@ -221,7 +222,6 @@ const HANDLERS: { [K in acp.SessionUpdate["sessionUpdate"]]?: Handler<K> } = {
   agent_thought_chunk: (update, state) => appendChunk(state, "thinking", update.content),
   tool_call: (update, state) => appendParagraph(state, `▸ ${update.title}`),
   tool_call_update: (update, state) => finishTool(update, state),
-  plan: (update, state) => appendPlan(update, state),
 };
 
 /** Maps one ACP update to Pi events and updates `state`. Undefined means the update type is ignored. */
@@ -327,11 +327,10 @@ export function truncateResult(text: string): string {
   return hidden > 0 ? `${shown}\n… (+${hidden} líneas)` : shown;
 }
 
-function appendPlan(update: acp.Plan, state: TurnState): AssistantMessageEvent[] {
-  const checklist = update.entries.map((entry) => PLAN_LINES[entry.status](entry.content)).join("\n");
-  if (checklist === state.plan) return [];
-  state.plan = checklist;
-  return appendParagraph(state, `Plan:\n\n${checklist}`);
+/** The plan while work remains; undefined once every entry is done. */
+function planWidget(entries: acp.PlanEntry[]): string[] | undefined {
+  if (entries.every((entry) => entry.status === "completed")) return undefined;
+  return ["Plan", ...entries.map((entry) => `${PLAN_MARKS[entry.status]} ${entry.content}`)];
 }
 
 function stopEvent(state: TurnState, reason: acp.StopReason): AssistantMessageEvent {

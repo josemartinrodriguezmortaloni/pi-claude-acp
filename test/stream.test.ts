@@ -39,6 +39,8 @@ function harness(conn = new FakeConnection(), beforeTask = () => {}) {
   const windows: [string, number][] = [];
   const logged: string[] = [];
   const permissions: RequestPermissionRequest[] = [];
+  const plans: (string[] | undefined)[] = [];
+  const elicitations: { message: string; aborted: boolean }[] = [];
   const deps: StreamDeps = {
     connect: async () => conn,
     withTurn: (request, task) =>
@@ -52,6 +54,11 @@ function harness(conn = new FakeConnection(), beforeTask = () => {}) {
         signal?.addEventListener("abort", () => resolve({ outcome: { outcome: "cancelled" } })),
       );
     },
+    elicit: async (request, signal) => {
+      elicitations.push({ message: request.message, aborted: signal?.aborted === true });
+      return { action: "accept", content: { question_0: "Postgres" } };
+    },
+    showPlan: (lines) => plans.push(lines),
     onContextWindow: (modelId, size) => windows.push([modelId, size]),
     noteCompaction: (session, update) => store.noteCompaction(session, update),
     log: (line) => logged.push(line),
@@ -62,7 +69,7 @@ function harness(conn = new FakeConnection(), beforeTask = () => {}) {
       events.push(event);
     return events;
   };
-  return { conn, store, windows, logged, permissions, run, deps };
+  return { conn, store, windows, logged, permissions, plans, elicitations, run, deps };
 }
 
 /** Makes the fake agent emit `updates` during the prompt, then stop with `stopReason`. */
@@ -178,20 +185,37 @@ describe("streamPrompt: content", () => {
     expect(output).toMatch(/````\n\nListo\.$/);
   });
 
-  it("C17: shows the plan as a checklist each time it changes", async () => {
+  it("C17: shows the plan in a live widget, not in the transcript, and clears it when everything is done", async () => {
     const h = harness();
-    const plan = (status: "pending" | "completed"): SessionUpdate => ({
+    const plan = (status: "pending" | "in_progress" | "completed"): SessionUpdate => ({
       sessionUpdate: "plan",
       entries: [
         { content: "Leer", priority: "high", status: "completed" },
         { content: "Editar", priority: "high", status },
+        { content: "Testear", priority: "low", status: status === "completed" ? "completed" : "pending" },
       ],
     });
-    script(h.conn, [plan("pending"), plan("pending"), plan("completed")], { stopReason: "end_turn" });
+    script(h.conn, [plan("in_progress"), plan("completed"), text("Listo.")], { stopReason: "end_turn" });
     const output = finalText(await h.run([user("hacé")]));
-    expect(output.match(/- \[x\] Leer/g)).toHaveLength(2);
-    expect(output).toContain("- [ ] Editar");
-    expect(output).toContain("- [x] Editar");
+    expect(h.plans).toEqual([["Plan", "✓ Leer", "› Editar", "· Testear"], undefined]);
+    expect(output).toBe("Listo.");
+  });
+
+  it("sends Claude Code questions to the elicitation handler with the turn signal", async () => {
+    const h = harness();
+    let answer: unknown;
+    h.conn.onPrompt = async (params, fake) => {
+      answer = await fake.elicit({
+        mode: "form",
+        sessionId: params.sessionId,
+        message: "¿Qué base?",
+        requestedSchema: { type: "object" },
+      });
+      return { stopReason: "end_turn" };
+    };
+    await h.run([user("elegí")]);
+    expect(h.elicitations).toEqual([{ message: "¿Qué base?", aborted: false }]);
+    expect(answer).toEqual({ action: "accept", content: { question_0: "Postgres" } });
   });
 
   it("C17: logs ignored and unknown updates without ending the stream", async () => {

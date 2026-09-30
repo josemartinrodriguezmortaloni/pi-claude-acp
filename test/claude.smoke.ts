@@ -39,6 +39,8 @@ const deps: StreamDeps = {
       ? { outcome: { outcome: "selected", optionId: reject.optionId } }
       : { outcome: { outcome: "cancelled" } };
   },
+  elicit: async () => ({ action: "decline" }),
+  showPlan: () => {},
   onContextWindow: (modelId, size) => catalog.setContextWindow(modelId, size),
   noteCompaction: (session, update) => store.noteCompaction(session, update),
   log: () => {},
