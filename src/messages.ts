@@ -7,7 +7,7 @@ export type Locale = "en" | "es";
 /** What a tool of a burst does, as the summary line counts it. */
 export type ToolCategory = "read" | "search" | "edit" | "create" | "command" | "fetch" | "subagent" | "plan";
 
-/** The modes of src/modes.ts, as the footer names them. */
+/** The modes of src/modes.ts, as the footer names them. U+FE0E keeps ⏸ a text glyph, not an emoji. */
 type ModeLabels = Record<"default" | "acceptEdits" | "plan", string>;
 
 export interface Messages {
@@ -137,7 +137,7 @@ const EN: Messages = {
   interrupted: "interrupted",
   thinkingFor: (seconds) => `Thinking ${seconds} s`,
   thoughtFor: (seconds) => `Thought for ${seconds} s`,
-  modeLabel: { default: "⏸ manual mode", acceptEdits: "⏵⏵ auto-accept edits", plan: "◇ plan mode" },
+  modeLabel: { default: "⏸\uFE0E manual mode", acceptEdits: "⏵⏵ auto-accept edits", plan: "◇ plan mode" },
   modeCommandDescription: "Switch the permission mode: manual, edits or plan",
   modeChoose: "Permission mode",
   modeUnknown: (value) => `Unknown mode: ${value}. Use manual, edits or plan.`,
@@ -212,7 +212,7 @@ const ES: Messages = {
   interrupted: "interrumpida",
   thinkingFor: (seconds) => `Pensando ${seconds} s`,
   thoughtFor: (seconds) => `Pensó ${seconds} s`,
-  modeLabel: { default: "⏸ modo manual", acceptEdits: "⏵⏵ ediciones automáticas", plan: "◇ modo plan" },
+  modeLabel: { default: "⏸\uFE0E modo manual", acceptEdits: "⏵⏵ ediciones automáticas", plan: "◇ modo plan" },
   modeCommandDescription: "Cambiá el modo de permisos: manual, edits o plan",
   modeChoose: "Modo de permisos",
   modeUnknown: (value) => `Modo desconocido: ${value}. Usá manual, edits o plan.`,

@@ -26,11 +26,11 @@ Referencia: [specs/pi-claude-acp.md](specs/pi-claude-acp.md).
 - [x] Modos Manual, Ediciones automáticas y Plan (`alt+m`, `/mode`, footer), aprobación de plan con pedido de cambios.
 - [x] Subagentes como rama `TASK` y widgets de plan y subagentes con el mismo estilo.
 - [x] Mensajes escritos durante un turno vivo (steer): esperan al fin del turno ACP y abren el siguiente en el mismo mensaje de Pi.
+- [x] README y capturas con la UI nueva.
 
 ## Pendiente
 
 - [ ] Modo Auto después de un smoke test con el hook `ask`.
-- [ ] README y capturas con la UI nueva.
 
 - [ ] Plugin validador en TS contra el contrato de §5.5 (fuera de alcance, otra sesión).
 - [ ] Plugin de self-compact: toma `session_before_compact` y se quita el handler de `index.ts`.

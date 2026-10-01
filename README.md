@@ -51,13 +51,18 @@
 
 pi-claude-acp is a [Pi](https://github.com/earendil-works/pi) extension that registers Claude Code as the Pi provider `claude-acp`. It launches [`claude-agent-acp`](https://github.com/agentclientprotocol/claude-agent-acp), the ACP adapter that Zed uses, which runs your installed `claude` binary with its own login. Pi owns the conversation, the permissions, the skills and the context. Claude Code receives the prompt, does the work with its native tools and streams the result back to Pi.
 
+In Pi, it reads as if you talk to the model directly: the transcript, the dialogs and the notifications are Pi's own, and none of them names Claude Code.
+
 ## Highlights
 
 - **Your binary, your login:** only the `claude` binary talks to Anthropic; the extension never reads, stores or logs tokens
-- **Pi approves every tool call:** a `PreToolUse` hook sends each Claude Code tool call to Pi validator plugins and the Pi dialog; the extension never approves on its own
-- **Live catalog:** models and effort levels come from the adapter at runtime; Pi thinking levels map to the closest effort
-- **Sessions that resume:** the ACP session id lives in the Pi session, so `--continue`, forks and tree navigation keep or reset Claude Code's history on purpose
-- **Questions through Pi:** `AskUserQuestion` opens Pi dialogs, and Claude Code's plan shows as a live widget above the editor
+- **Pi approves every tool call:** a `PreToolUse` hook sends each tool call to Pi validator plugins, the session mode and the Pi dialog
+- **Collapsible activity:** each burst of tools is one tree entry with the diff of every edit; `Ctrl+O` expands all of them
+- **Reasoning you can watch:** a live clock and the last line while the model reasons, then `Thought for N s`
+- **Modes and plans:** manual, auto-accept edits and plan mode on `alt+m`, and plan approval with Claude Code's three answers
+- **Live widgets:** the plan and the running subagents show above the editor
+- **Sessions that resume:** the ACP session id and the mode live in the Pi session, so `--continue`, forks and tree navigation keep or reset the history on purpose
+- **Your language:** every text follows the system locale; English and Spanish ship today
 
 <p>
   <a href="https://github.com/earendil-works/pi"><img alt="Pi 0.99.1" src="https://img.shields.io/badge/PI-0.99.1-0a0a0a.svg?style=for-the-badge&amp;labelColor=000000" height="28"></a>
@@ -90,7 +95,7 @@ pi install "$PWD"
 
 ## Get started
 
-Pick a Claude Code model with `/model`, or start Pi on one:
+Pick a model of the `Claude (subscription)` provider with `/model`, or start Pi on one:
 
 ```bash
 pi --provider claude-acp --model sonnet
@@ -120,6 +125,7 @@ The extension has no settings file. It reads these sources:
 | `CLAUDE_CODE_EXECUTABLE`                         | Path to the `claude` binary. Without it, the extension looks up `claude` on the `PATH`                        |
 | `~/.pi/agent/mcp.json`                           | MCP servers passed to each Claude Code session; servers with `"enabled": false` are skipped                   |
 | `~/.pi/agent/AGENTS.md`, `./AGENTS.md`, Pi skills | Sent as a `<pi-context>` block before the first prompt of each Claude Code session                            |
+| `LC_ALL`, `LC_MESSAGES`, `LANG`                  | Language of every text the extension shows, in that order. Without a catalog for it, English                  |
 | `~/.pi/agent/claude-acp/adapter.log`             | Output, not input: adapter stderr, and every permission request with its answer                              |
 
 The extension checks the binary before it starts the adapter: the first line of `claude --version` must be `<x.y.z> (Claude Code)`. A wrapper that prints anything else fails with the tested path and its output. For example, the mise shim prints install progress, so point the variable at the real binary:
@@ -158,34 +164,44 @@ flowchart LR
 
 Pi calls the provider's `streamSimple` with the whole transcript. The extension sends only the last user message: Claude Code keeps the rest of the history in its own session.
 
+Pi can expand and collapse only its own components, not the text of a provider message. So the extension splits each ACP turn ([ADR 0001](docs/adr/0001-segmentar-el-turno-con-herramientas-espejo.md)): when Claude Code starts a burst of tools, or starts reasoning, the Pi message ends with a call to `agent_activity`. Pi runs that tool, which runs nothing: it shows the burst live and waits for it to end. Then Pi calls `streamSimple` again, and the extension continues the same ACP turn instead of sending a new prompt.
+
 ```mermaid
 sequenceDiagram
     autonumber
     participant Pi
     participant Ext as pi-claude-acp
     participant ACP as claude-agent-acp
-    participant CC as claude
 
     Pi->>Ext: streamSimple(model, context, options)
     Ext->>ACP: session/new or session/resume
-    ACP-->>Ext: configOptions (model, effort)
-    Ext->>ACP: session/set_mode "default"
+    Ext->>ACP: session/set_mode (the Pi session's mode)
     Ext->>ACP: session/set_config_option (model, effort)
     Ext->>ACP: session/prompt (context block + last user message)
-    ACP->>CC: query
-    loop while Claude Code works
-        ACP-->>Ext: session/update (text, thinking, tool_call, plan, usage)
-        Ext-->>Pi: text_delta / thinking_delta
-    end
+    ACP-->>Ext: agent_message_chunk
+    Ext-->>Pi: text_delta
+    ACP-->>Ext: tool_call
+    Ext-->>Pi: toolCall agent_activity, done (toolUse)
+    Pi->>Ext: execute agent_activity
+    ACP-->>Ext: tool_call_update (status, output, diff)
+    Ext-->>Pi: partial result: the entry redraws
+    ACP-->>Ext: agent_message_chunk
+    Ext-->>Pi: agent_activity result
+    Pi->>Ext: streamSimple: the same ACP turn continues
+    Ext-->>Pi: text_delta
     ACP-->>Ext: PromptResponse (stopReason, usage)
-    Ext-->>Pi: done or error
+    Ext-->>Pi: done
     Pi->>Ext: agent_end
     Ext->>Pi: appendEntry("claude-acp-session", record)
 ```
 
-The extension forces the `default` mode after it creates or resumes a session. The adapter reads `defaultMode` from `~/.claude` even with `settingSources: []`, and a permissive mode could skip the `ask` hook.
+`agent_activity` is active so that Pi can run it, but no model request declares it. Its name is not one of Pi's tools: with `read` or `edit`, Pi would run the real tool again.
 
-The context block (steps 6 and later) goes only with the first prompt of each ACP session. It goes again after a new session, a reset, or a compaction inside Claude Code.
+The extension sets the Pi session's mode after it creates or resumes a session. The adapter reads `defaultMode` from `~/.claude` even with `settingSources: []`, and a mode the user did not pick could skip the `ask` hook.
+
+The context block (step 5) goes only with the first prompt of each ACP session. It goes again after a new session, a reset, or a compaction inside Claude Code.
+
+ACP takes no input while a prompt runs. A message you write meanwhile shows in Pi at once and waits: when the ACP turn ends, it opens the next one in the same Pi message. A cancelled turn drops it.
 
 ### Permissions
 
@@ -208,6 +224,8 @@ sequenceDiagram
         Ext-->>ACP: reject_once
     else every vote is allow
         Ext-->>ACP: allow_once
+    else the session mode approves it
+        Ext-->>ACP: allow_once
     else ask, or no validators
         Ext->>UI: select (one dialog at a time)
         UI-->>Ext: option
@@ -216,16 +234,18 @@ sequenceDiagram
     ACP->>CC: run or skip the tool
 ```
 
-![Pi permission dialog for a Claude Code Bash call](docs/screenshots/permission.png)
+![Pi permission dialog for a Bash call, with the branch awaiting approval](docs/screenshots/permission.png)
 
 | Case                                    | Answer                                                                 |
 | --------------------------------------- | ---------------------------------------------------------------------- |
 | A validator votes `deny`, or its vote rejects | Reject                                                           |
 | All validators vote `allow`             | Approve                                                                |
+| The session mode approves it ([Modes](#modes)) | Approve                                                          |
 | A validator votes `ask`, or none votes  | Pi dialog. Without a Pi UI, reject                                     |
+| `ExitPlanMode`                          | The plan dialog ([Plans](#plans)); validators are not asked            |
 | The turn is cancelled                   | `cancelled`                                                            |
 
-The dialog hides the "always allow" options: with the `ask` hook, Claude Code ignores the rule they write. Pi keeps one dialog at a time, so parallel tool calls wait in a queue instead of replacing each other.
+The dialog title names the tool and what it acts on, as in `Bash · rm -rf dist`. While the dialog is open, the tool's branch reads `? awaiting approval`. The dialog hides the "always allow" options: with the `ask` hook, Claude Code ignores the rule they write. Pi keeps one dialog at a time, so parallel tool calls wait in a queue instead of replacing each other.
 
 A validator is a Pi extension that listens on `pi.events` and calls `vote` synchronously in its handler:
 
@@ -247,27 +267,77 @@ export default function (pi: ExtensionAPI) {
 }
 ```
 
-### Questions and plan
+### Modes
 
-The extension announces the ACP `elicitation.form` capability. When Claude Code calls `AskUserQuestion`, each question opens a Pi `select`. "Otra respuesta…" opens a text field, and a multi-select question toggles options until "Listo". Escape declines the form, which Claude Code reads as "the user skipped".
+The mode sets what Claude Code may do without a dialog. `alt+m` moves to the next mode, and `/mode [manual|edits|plan]` picks one. The footer shows the mode while a `claude-acp` model is active.
+
+| Mode              | Footer                  | Approves without a dialog                                              |
+| ----------------- | ----------------------- | ---------------------------------------------------------------------- |
+| Manual            | `⏸ manual mode`         | Only Claude Code's internal `ToolSearch`                               |
+| Auto-accept edits | `⏵⏵ auto-accept edits`  | `Edit`, `MultiEdit`, `Write` and `NotebookEdit` inside the working directory |
+| Plan              | `◇ plan mode`           | The plan file Claude Code writes in `~/.claude/plans`                  |
+
+Validators vote before the mode: a `deny` still wins. A `claude-acp-mode` entry saves each change, so a resumed session keeps its mode and a new one starts in Manual. When Claude Code changes its own mode, for example when it enters plan mode, the footer follows. Auto and bypass are not offered: Auto needs a test against the `ask` hook, and bypass skips the validators.
+
+### Plans
+
+In plan mode, Claude Code ends with `ExitPlanMode`. Its branch shows the whole plan under a `PLAN` chip, and the plan never collapses: it is what you approve. Then a Pi dialog asks `Would you like to proceed?`:
+
+| Answer                        | Effect                                                                |
+| ----------------------------- | --------------------------------------------------------------------- |
+| Yes, and auto-accept edits    | Carries out the plan in auto-accept edits                             |
+| Yes, manually approve edits   | Carries out the plan in Manual                                        |
+| No, keep planning             | Asks what to change, and sends your answer as the next message        |
+
+The adapter's options that clear the context are not offered: they would detach the ACP session from the Pi session. When the model has an Auto mode, the adapter offers no auto-accept edits option, so the extension approves in Manual and switches the mode once the adapter applies it.
+
+![A plan under its PLAN chip and the approval dialog](docs/screenshots/plan.png)
+
+### Questions and widgets
+
+The extension announces the ACP `elicitation.form` capability. When Claude Code calls `AskUserQuestion`, each question opens a Pi `select`. "Other answer…" opens a text field, and a multi-select question toggles options until "Done". Escape declines the form, which Claude Code reads as "the user skipped".
 
 ![AskUserQuestion answered with a Pi dialog](docs/screenshots/question.png)
 
-When Claude Code sends a plan, it shows as a widget above the editor: `✓` done, `›` in progress, `·` pending. The widget closes when every entry is done.
+Two widgets above the editor show work in progress: Claude Code's plan, and the subagents of the turn. Both use the same rows: `✓` struck through when done, `●` in progress, `○` pending. Each shows 4 rows; `Ctrl+O` shows all of them. A widget closes when everything in it is done.
 
 ### Transcript
 
-Claude Code's tool calls are Markdown text in the Pi message, not Pi tool calls: Pi did not run them.
+Text stays text. Everything else Claude Code does is an entry of `agent_activity`, and `Ctrl+O` expands or collapses every entry at once.
 
-| ACP update                              | In Pi                                                                  |
+```text
+• Thought for 6 s
+● 4 tools · 1 read · 1 edit · 1 command · +1 −1 · ✗ 1 failed
+├ Read src/permissions.ts · 149 lines
+├  EDIT   src/permissions.ts +1 −1
+│   132   function dialogTitle(toolCall) {
+│  -133     return [`…`, toolDetail(toolCall)]
+│  +133     return copy.permissionTitle(toolName(toolCall), toolDetail(toolCall));
+├  CREATE src/messages.ts +214
+└  BASH   bun run test  FAILED
+   ✗ C12 dialog title names the tool
+```
+
+| From Claude Code                        | In Pi                                                                  |
 | --------------------------------------- | ---------------------------------------------------------------------- |
-| `agent_message_chunk`                   | Text                                                                   |
-| `agent_thought_chunk`                   | Thinking                                                               |
-| `tool_call`                             | `▸ <title>`                                                            |
-| `tool_call_update`, final status        | `✓ completed` or `✗ failed`, then the first 5 lines or 400 characters of the result |
+| Message text                            | Text                                                                   |
+| Thoughts                                | A reasoning entry: a blinking mark, the seconds and the last line, then `Thought for N s`. Expanded, the whole text |
+| Tool calls in a row                     | One burst entry: a summary line, then one branch per tool              |
+| `Edit`, `Write` over a file             | `EDIT` chip and the diff, numbered from its place in the file: 12 lines, 80 expanded |
+| `Write` of a new file                   | `CREATE` chip and one line; the content when expanded                  |
+| `Bash`                                  | `BASH` chip and the first 5 lines of output, 20 expanded               |
+| Reads, searches, fetches                | One muted line with what they found; the output when expanded          |
+| A subagent's tools                      | Under its `TASK` branch, shown when expanded                           |
+| A failed tool                           | `FAILED` chip and its output, always                                   |
 | `plan`                                  | Widget above the editor                                                |
 | `usage_update`                          | Turn cost and the model's context window                               |
 | `compaction_update`                     | The next prompt carries the context block again                        |
+
+Only tools that change something carry a chip. Each state has its own mark, so the transcript reads without color: `…` running, `? awaiting approval`, `✗ rejected`, `■ interrupted`.
+
+![A burst with a read, an edit and its diff, and a command](docs/screenshots/activity.png)
+
+Recent models send empty thoughts unless the session asks for a summary, so every session asks for `thinking: { type: "adaptive", display: "summarized" }`.
 
 ### Sessions
 
@@ -288,6 +358,7 @@ flowchart TD
 ```
 
 - Turns of one Pi session run one after another.
+- A notice about the session, such as a reset, shows as a Pi notification, never inside the model's answer.
 - Pi's own compaction is cancelled for `claude-acp` models: Claude Code compacts its own history.
 
 ### Models
@@ -310,11 +381,21 @@ Each module owns one reason to change. `index.ts` only registers the provider an
 | `connection.ts`  | Binary check, adapter process, ACP handshake, routing by session      | The ACP SDK changes                  |
 | `sessions.ts`    | Pi session ↔ ACP session, session options, context block, MCP servers | Pi session semantics change          |
 | `catalog.ts`     | `configOptions` → Pi models and thinking levels                       | The adapter's model format changes   |
-| `stream.ts`      | `session/update` → Pi message events                                  | The Pi or ACP stream contract changes |
-| `permissions.ts` | `request_permission` → validator votes and the Pi dialog              | The validation contract changes      |
+| `stream.ts`      | `session/update` → Pi message events, one segment per Pi message      | The Pi or ACP stream contract changes |
+| `turn.ts`        | The live ACP turn across Pi messages, its event queue and activities  | The segmentation contract changes    |
+| `burst.ts`       | Tool entries from ACP reports, bursts, file changes                   | The adapter's tool reports change    |
+| `reasoning.ts`   | One run of reasoning                                                  | The reasoning display changes        |
+| `activity.ts`    | The `agent_activity` tool                                             | Pi's tool contract changes           |
+| `activity-view.ts` | The lines of an entry: tree, chips, diffs, reasoning                | The transcript design changes        |
+| `progress-widget.ts` | The plan and subagent widgets                                     | The widget design changes            |
+| `modes.ts`       | The modes and what each approves                                      | A mode's policy changes              |
+| `mode-control.ts` | The mode of each Pi session, the footer, `alt+m` and `/mode`         | How you switch modes changes         |
+| `plan-approval.ts` | The `ExitPlanMode` dialog                                           | The plan approval contract changes   |
+| `permissions.ts` | `request_permission` → validator votes, the mode and the Pi dialog    | The validation contract changes      |
 | `elicitation.ts` | ACP form elicitation → Pi dialogs                                     | The elicitation contract changes     |
 | `dialogs.ts`     | One Pi dialog at a time                                               | Pi's dialog model changes            |
 | `login.ts`       | Login check at session start and `/claude-login`                      | Claude Code's auth CLI changes       |
+| `messages.ts`    | Every text the extension shows, by locale                             | A text or a language changes         |
 
 ```mermaid
 classDiagram
@@ -378,7 +459,28 @@ classDiagram
         withTurn(request, task)
         decide(request, signal)
         elicit(request, signal)
-        showPlan(lines)
+        showPlan(entries)
+        showSubagents(tools)
+        onModeChange(modeId)
+    }
+    class TurnRegistry {
+        -turns: Map~string, LiveTurn~
+        open(key, segmented, modelId)
+        live(key) LiveTurn
+        takeActivity(id)
+    }
+    class LiveTurn {
+        events: EventQueue~TurnEvent~
+        tools: ToolBook
+        startBurst(toolCallId) Burst
+        startReasoning() Reasoning
+        addSteers(messages)
+    }
+    class Activity {
+        <<interface>>
+        id: string
+        done: Promise~ActivityDetails~
+        subscribe(listener)
     }
 
     SharedConnection --> AcpConnection : opens and reuses
@@ -390,13 +492,18 @@ classDiagram
     SessionStore ..> Catalog : onConfig(configOptions)
     StreamDeps ..> SessionStore : withTurn
     StreamDeps ..> SharedConnection : connect
+    StreamDeps --> TurnRegistry : turns
+    TurnRegistry o-- LiveTurn : one per Pi session
+    LiveTurn o-- Activity : open burst or reasoning
 ```
 
 ## Limits
 
 - Claude Code receives only the last user message. Editing an earlier message in Pi, or moving in the tree, starts a new Claude Code session without the old history.
 - Pi's system prompt is not sent. Claude Code keeps its own; Pi context arrives as the `<pi-context>` block.
-- Pi does not run Claude Code's tools, so Pi tool hooks and renderers do not see them. Validators see them through `claude-acp:tool-request`.
+- Pi runs only `agent_activity`, which waits for Claude Code. Pi tool hooks see `agent_activity`, not Claude Code's tools; validators see those through `claude-acp:tool-request`.
+- Each burst and each run of reasoning adds a Pi message and a tool result to the session.
+- A message you write during a turn reaches Claude Code when the turn ends, not at once.
 - The adapter version is pinned. A new adapter needs a new release of this extension.
 
 ## Development
@@ -414,11 +521,11 @@ Gate every change before a commit:
 | `bun run lint`       | Biome                                                                    |
 | `bun run complexity` | ESLint, cyclomatic complexity < 4 per function                           |
 | `bun run test`       | vitest against an in-memory ACP connection and a fake adapter            |
-| `bun run smoke`      | Real Claude Code: lists models, sends a prompt, checks the permission hook. Uses quota |
+| `bun run smoke`      | Real Claude Code: lists models, sends a prompt, checks the permission hook. Runs one Pi message, without `agent_activity`. Uses quota |
 
 `pre-commit` runs typecheck, lint and complexity. `pre-push` runs typecheck and tests. The smoke test never runs in a hook.
 
-[`specs/pi-claude-acp.md`](specs/pi-claude-acp.md) holds the design, its invariants and the edge cases. Each edge case has a test with `C<n>` in its name.
+[`specs/pi-claude-acp.md`](specs/pi-claude-acp.md) holds the design, its invariants and the edge cases. Each edge case has a test with `C<n>` in its name. [`CONTEXT.md`](CONTEXT.md) holds the glossary, and [`docs/adr/`](docs/adr/) the decisions that are hard to reverse.
 
 ## Credits
 
