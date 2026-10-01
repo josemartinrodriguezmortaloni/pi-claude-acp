@@ -33,6 +33,7 @@ function setup(options: { votes?: Vote[]; ui?: string | undefined | "none"; sign
     });
   }
   const ctx: DecideContext = {
+    ...DEFAULTS,
     events,
     signal: options.signal,
     ui:
@@ -43,10 +44,18 @@ function setup(options: { votes?: Vote[]; ui?: string | undefined | "none"; sign
               shown.push({ title, options: labels });
               return options.ui;
             },
+            input: noInput,
           },
   };
   return { ctx, shown, requests };
 }
+
+/** The parts of the context these tests do not exercise. */
+const DEFAULTS = {
+  autoApproves: () => false,
+  plan: { acceptEditsAfterApproval: () => {}, sendFeedback: () => {} },
+};
+const noInput = async () => undefined;
 
 const selected = (optionId: string) => ({ outcome: { outcome: "selected", optionId } });
 const cancelled = { outcome: { outcome: "cancelled" } };
@@ -73,8 +82,19 @@ describe("C23/C30: decide combines validator votes", () => {
   it("asks the user when no validator votes", async () => {
     const { ctx, shown } = setup({ ui: "Rechazar" });
     await expect(decide(REQUEST, ctx)).resolves.toEqual(selected("reject"));
-    expect(shown[0]?.title).toContain("Bash");
-    expect(shown[0]?.title).toContain("rm -rf build");
+    expect(shown[0]?.title).toBe("Bash · rm -rf build");
+  });
+
+  it("titles the dialog with the tool name the adapter reports, not its title", async () => {
+    const { ctx, shown } = setup({ ui: "Rechazar" });
+    const toolCall = {
+      toolCallId: "t2",
+      title: "Read src/x.ts",
+      rawInput: { file_path: "src/x.ts" },
+      _meta: { claudeCode: { toolName: "Read" } },
+    };
+    await decide({ ...REQUEST, toolCall }, ctx);
+    expect(shown[0]?.title).toBe("Read · src/x.ts");
   });
 
   it("C24: rejects when nobody decides and Pi has no UI", async () => {
@@ -90,7 +110,9 @@ describe("C23/C30: decide combines validator votes", () => {
   it("treats a failed vote as a deny", async () => {
     const events = createEventBus();
     events.on(TOOL_REQUEST_EVENT, (data) => (data as ToolRequest).vote(Promise.reject(new Error("crash"))));
-    await expect(decide(REQUEST, { events, ui: undefined })).resolves.toEqual(selected("reject"));
+    await expect(decide(REQUEST, { ...DEFAULTS, events, ui: undefined })).resolves.toEqual(
+      selected("reject"),
+    );
   });
 
   it("gives validators the tool call and the filtered options", async () => {
@@ -134,7 +156,7 @@ function piLikeUi() {
 describe("parallel permission requests", () => {
   it("shows one Pi dialog at a time, so a second request cannot orphan the first", async () => {
     const { ui, answerOpen } = piLikeUi();
-    const ctx: DecideContext = { events: createEventBus(), ui };
+    const ctx: DecideContext = { ...DEFAULTS, events: createEventBus(), ui: { ...ui, input: noInput } };
     const read = { ...REQUEST, toolCall: { toolCallId: "t1", title: "Read a.ts" } };
     const bash = { ...REQUEST, toolCall: { toolCallId: "t2", title: "Bash ls" } };
     const decisions = Promise.all([decide(read, ctx), decide(bash, ctx)]);
@@ -149,7 +171,7 @@ describe("decide during cancellation", () => {
     const controller = new AbortController();
     const events = createEventBus();
     events.on(TOOL_REQUEST_EVENT, (data) => (data as ToolRequest).vote(new Promise(() => {})));
-    const decision = decide(REQUEST, { events, ui: undefined, signal: controller.signal });
+    const decision = decide(REQUEST, { ...DEFAULTS, events, ui: undefined, signal: controller.signal });
     controller.abort();
     await expect(decision).resolves.toEqual(cancelled);
   });
@@ -166,9 +188,11 @@ describe("decide during cancellation", () => {
     const controller = new AbortController();
     const events = createEventBus();
     const ctx: DecideContext = {
+      ...DEFAULTS,
       events,
       signal: controller.signal,
       ui: {
+        input: noInput,
         select: (_title, _labels, opts) =>
           new Promise((resolve) => {
             opts?.signal?.addEventListener("abort", () => resolve(undefined));
@@ -177,5 +201,29 @@ describe("decide during cancellation", () => {
       },
     };
     await expect(decide(REQUEST, ctx)).resolves.toEqual(cancelled);
+  });
+});
+
+describe("modes in decide", () => {
+  it("approves without a dialog what the mode approves, once validators let it through", async () => {
+    const { ctx, shown } = setup({ votes: ["ask"], ui: "Rechazar" });
+    await expect(decide(REQUEST, { ...ctx, autoApproves: () => true })).resolves.toEqual(selected("allow"));
+    expect(shown).toEqual([]);
+  });
+
+  it("lets a validator deny what the mode would approve", async () => {
+    const { ctx } = setup({ votes: ["deny"] });
+    await expect(decide(REQUEST, { ...ctx, autoApproves: () => true })).resolves.toEqual(selected("reject"));
+  });
+
+  it("sends a plan approval to the plan dialog, not to the validators", async () => {
+    const { ctx, requests, shown } = setup({ votes: ["allow"], ui: "No, seguir planificando" });
+    const plan = {
+      ...REQUEST,
+      toolCall: { toolCallId: "p1", _meta: { claudeCode: { toolName: "ExitPlanMode" } } },
+    };
+    await expect(decide(plan, ctx)).resolves.toEqual(selected("reject"));
+    expect(requests).toEqual([]);
+    expect(shown[0]?.title).toBe("¿Ejecutar este plan?");
   });
 });

@@ -1,4 +1,10 @@
-import type { PromptRequest, RequestPermissionRequest, SessionUpdate } from "@agentclientprotocol/sdk";
+import type {
+  PlanEntry,
+  PromptRequest,
+  RequestPermissionRequest,
+  RequestPermissionResponse,
+  SessionUpdate,
+} from "@agentclientprotocol/sdk";
 import { RequestError } from "@agentclientprotocol/sdk";
 import {
   type Api,
@@ -9,8 +15,13 @@ import {
   type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
+import { activityTool } from "../src/activity.ts";
+import type { BurstDetails, ToolEntry } from "../src/burst.ts";
+import { copy } from "../src/messages.ts";
+import type { ReasoningDetails } from "../src/reasoning.ts";
 import { SessionStore } from "../src/sessions.ts";
-import { type StreamDeps, streamPrompt, truncateResult } from "../src/stream.ts";
+import { type StreamDeps, streamPrompt } from "../src/stream.ts";
+import { TurnRegistry } from "../src/turn.ts";
 import { FakeConnection } from "./fake-connection.ts";
 
 const MODEL: Model<Api> = {
@@ -35,12 +46,15 @@ function harness(conn = new FakeConnection(), beforeTask = () => {}) {
     mcpServers: async () => [],
     contextBlock: async () => "<pi-context/>",
     onConfig: () => {},
+    mode: () => "default",
   });
   const windows: [string, number][] = [];
   const logged: string[] = [];
   const permissions: RequestPermissionRequest[] = [];
-  const plans: (string[] | undefined)[] = [];
+  const plans: PlanEntry[][] = [];
+  const subagentTools: ToolEntry[][] = [];
   const elicitations: { message: string; aborted: boolean }[] = [];
+  const notified: string[] = [];
   const deps: StreamDeps = {
     connect: async () => conn,
     withTurn: (request, task) =>
@@ -58,9 +72,14 @@ function harness(conn = new FakeConnection(), beforeTask = () => {}) {
       elicitations.push({ message: request.message, aborted: signal?.aborted === true });
       return { action: "accept", content: { question_0: "Postgres" } };
     },
-    showPlan: (lines) => plans.push(lines),
+    notify: (message) => notified.push(message),
+    onModeChange: () => {},
+    showPlan: (entries) => plans.push(entries),
+    showSubagents: (tools) => subagentTools.push(tools),
     onContextWindow: (modelId, size) => windows.push([modelId, size]),
     noteCompaction: (session, update) => store.noteCompaction(session, update),
+    turns: new TurnRegistry(),
+    isAgentSession: (sessionId) => sessionId === "pi-1",
     log: (line) => logged.push(line),
   };
   const run = async (messages: Message[], options: SimpleStreamOptions = { sessionId: "pi-1" }) => {
@@ -69,7 +88,80 @@ function harness(conn = new FakeConnection(), beforeTask = () => {}) {
       events.push(event);
     return events;
   };
-  return { conn, store, windows, logged, permissions, plans, elicitations, run, deps };
+  const loop = (messages: Message[], options: SimpleStreamOptions = { sessionId: "pi-1" }) =>
+    agentLoop(deps, messages, options);
+  return {
+    conn,
+    store,
+    windows,
+    logged,
+    permissions,
+    plans,
+    subagentTools,
+    elicitations,
+    notified,
+    run,
+    loop,
+    deps,
+  };
+}
+
+interface LoopRun {
+  /** The events of each Pi assistant message, in order. */
+  segments: AssistantMessageEvent[][];
+  /** The details of each activity tool result that shows tools. */
+  bursts: BurstDetails[];
+  /** The details of each activity tool result that shows reasoning. */
+  reasonings: ReasoningDetails[];
+  /** Every partial result the activity tool reported for a burst. */
+  partials: BurstDetails[];
+  /** The model-facing text of each activity tool result. */
+  summaries: string[];
+}
+
+/**
+ * Pi's agent loop over claude-acp (pi-agent-core/dist/agent-loop.js:130-175): an assistant message
+ * that ends with a tool call runs the tool, then the provider is called again with the result.
+ */
+async function agentLoop(
+  deps: StreamDeps,
+  messages: Message[],
+  options: SimpleStreamOptions,
+): Promise<LoopRun> {
+  const tool = activityTool(deps.turns);
+  const context = [...messages];
+  const run: LoopRun = { segments: [], bursts: [], reasonings: [], partials: [], summaries: [] };
+  for (;;) {
+    const events: AssistantMessageEvent[] = [];
+    for await (const event of streamPrompt(MODEL, normalizeContext({ messages: context }), options, deps))
+      events.push(event);
+    run.segments.push(events);
+    const last = events.at(-1);
+    if (last?.type !== "done" || last.reason !== "toolUse") return run;
+    const call = last.message.content.find((block) => block.type === "toolCall");
+    if (!call) throw new Error("toolUse without a tool call");
+    const result = await tool.execute(
+      call.id,
+      {},
+      options.signal,
+      (partial) => {
+        if ("tools" in partial.details) run.partials.push(partial.details);
+      },
+      {} as never,
+    );
+    if ("tools" in result.details) run.bursts.push(result.details);
+    else run.reasonings.push(result.details);
+    run.summaries.push(result.content.map((block) => (block.type === "text" ? block.text : "")).join(""));
+    context.push(last.message, {
+      role: "toolResult",
+      toolCallId: call.id,
+      toolName: call.name,
+      content: result.content,
+      details: result.details as never,
+      isError: false,
+      timestamp: 0,
+    });
+  }
 }
 
 /** Makes the fake agent emit `updates` during the prompt, then stop with `stopReason`. */
@@ -84,6 +176,20 @@ function script(
   };
 }
 
+/** A tool_call as claude-agent-acp reports it: `_meta.claudeCode.toolName` names the tool (renderer.js:453-465). */
+const toolCall = (
+  toolCallId: string,
+  toolName: string,
+  title: string,
+  extra: Partial<Extract<SessionUpdate, { sessionUpdate: "tool_call" }>> = {},
+): SessionUpdate => ({
+  sessionUpdate: "tool_call",
+  toolCallId,
+  title,
+  ...extra,
+  _meta: { claudeCode: { toolName, ...Object(Object(extra._meta).claudeCode) } },
+});
+
 const text = (t: string): SessionUpdate => ({
   sessionUpdate: "agent_message_chunk",
   content: { type: "text", text: t },
@@ -92,6 +198,11 @@ const thought = (t: string): SessionUpdate => ({
   sessionUpdate: "agent_thought_chunk",
   content: { type: "text", text: t },
 });
+/** Resolves once `condition` holds, checking after each pending task. */
+async function until(condition: () => boolean): Promise<void> {
+  while (!condition()) await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 const finalText = (events: AssistantMessageEvent[]) => {
   const last = events.at(-1);
   const message = last?.type === "done" ? last.message : last?.type === "error" ? last.error : undefined;
@@ -118,10 +229,21 @@ describe("streamPrompt: content", () => {
     });
   });
 
-  it("C17: streams thought chunks as thinking and closes the block when text starts", async () => {
+  it("shows the thoughts of an agent turn as a run of reasoning, then the text in the next message", async () => {
+    const h = harness();
+    script(h.conn, [thought("pienso "), thought("en esto"), text("respuesta")], { stopReason: "end_turn" });
+    const run = await h.loop([user("hola")]);
+    expect(run.reasonings).toEqual([
+      { reasoning: { text: "pienso en esto", startedAt: expect.any(Number), endedAt: expect.any(Number) } },
+    ]);
+    expect(run.summaries).toEqual(["pienso en esto"]);
+    expect(finalText(run.segments[1] ?? [])).toBe("respuesta");
+  });
+
+  it("C17: streams the thoughts of an internal call as thinking and closes the block when text starts", async () => {
     const h = harness();
     script(h.conn, [thought("pienso"), text("respuesta")], { stopReason: "end_turn" });
-    const events = await h.run([user("hola")]);
+    const events = await h.run([user("hola")], { sessionId: "pi-internal" });
     expect(events.map((e) => e.type)).toEqual([
       "start",
       "thinking_start",
@@ -134,13 +256,13 @@ describe("streamPrompt: content", () => {
     ]);
   });
 
-  it("C17: shows tool calls as text lines, never as Pi tool call events", async () => {
+  it("C17: ends the message with one activity tool call per burst and continues the same ACP turn after it", async () => {
     const h = harness();
     script(
       h.conn,
       [
         text("Leo el archivo."),
-        { sessionUpdate: "tool_call", toolCallId: "t1", title: "Read src/index.ts", status: "pending" },
+        toolCall("t1", "Read", "Read src/index.ts", { kind: "read", status: "pending" }),
         { sessionUpdate: "tool_call_update", toolCallId: "t1", status: "in_progress" },
         {
           sessionUpdate: "tool_call_update",
@@ -148,66 +270,193 @@ describe("streamPrompt: content", () => {
           status: "completed",
           content: [{ type: "content", content: { type: "text", text: "export {}" } }],
         },
-        { sessionUpdate: "tool_call", toolCallId: "t2", title: "Bash ls" },
+        toolCall("t2", "Bash", "ls", { kind: "execute" }),
         { sessionUpdate: "tool_call_update", toolCallId: "t2", status: "failed", rawOutput: "no such file" },
-      ],
-      { stopReason: "end_turn" },
-    );
-    const events = await h.run([user("leé")]);
-    expect(events.some((e) => e.type.startsWith("toolcall"))).toBe(false);
-    const output = finalText(events);
-    expect(output).toContain("Leo el archivo.\n\n▸ Read src/index.ts");
-    expect(output).toContain("✓ completed\n\n```\nexport {}\n```");
-    expect(output).toContain("▸ Bash ls");
-    expect(output).toContain("✗ failed\n\n```\nno such file\n```");
-    expect(output).not.toContain("in_progress");
-  });
-
-  it("C17: replaces the adapter's own fence around a tool result instead of nesting it", async () => {
-    const h = harness();
-    script(
-      h.conn,
-      [
-        { sessionUpdate: "tool_call", toolCallId: "t1", title: "Terminal" },
-        {
-          sessionUpdate: "tool_call_update",
-          toolCallId: "t1",
-          status: "completed",
-          content: [
-            { type: "content", content: { type: "text", text: "```console\n.gitignore\nTASKS.md\n```" } },
-          ],
-        },
-      ],
-      { stopReason: "end_turn" },
-    );
-    const output = finalText(await h.run([user("listá")]));
-    expect(output).toContain("✓ completed\n\n```console\n.gitignore\nTASKS.md\n```");
-    expect(output).not.toContain("````");
-  });
-
-  it("C17: fences a tool result with more backticks than it contains, so its fences cannot close ours", async () => {
-    const h = harness();
-    const markdown = "# Doc\n```mermaid\nflowchart LR\n```";
-    script(
-      h.conn,
-      [
-        { sessionUpdate: "tool_call", toolCallId: "t1", title: "Read spec.md" },
-        {
-          sessionUpdate: "tool_call_update",
-          toolCallId: "t1",
-          status: "completed",
-          content: [{ type: "content", content: { type: "text", text: markdown } }],
-        },
         text("Listo."),
       ],
       { stopReason: "end_turn" },
     );
-    const output = finalText(await h.run([user("leé")]));
-    expect(output).toContain(`\`\`\`\`\n${markdown}\n\`\`\`\``);
-    expect(output).toMatch(/````\n\nListo\.$/);
+    const run = await h.loop([user("leé")]);
+    expect(run.segments).toHaveLength(2);
+    expect(finalText(run.segments[0] ?? [])).toBe("Leo el archivo.");
+    expect(run.segments[0]?.at(-1)).toMatchObject({ type: "done", reason: "toolUse" });
+    expect(run.bursts[0]?.tools).toMatchObject([
+      { id: "t1", target: "src/index.ts", status: "completed", output: "export {}" },
+      { id: "t2", target: "ls", status: "failed", output: "no such file" },
+    ]);
+    expect(finalText(run.segments[1] ?? [])).toBe("Listo.");
+    expect(run.segments[1]?.at(-1)).toMatchObject({ type: "done", reason: "stop" });
+    expect(h.conn.callsOf("prompt")).toHaveLength(1);
   });
 
-  it("C17: shows the plan in a live widget, not in the transcript, and clears it when everything is done", async () => {
+  it("reports each change of the burst while it runs", async () => {
+    const h = harness();
+    script(
+      h.conn,
+      [
+        toolCall("t1", "Bash", "ls", { kind: "execute", status: "pending" }),
+        { sessionUpdate: "tool_call_update", toolCallId: "t1", status: "completed", rawOutput: "a.ts" },
+      ],
+      { stopReason: "end_turn" },
+    );
+    const run = await h.loop([user("listá")]);
+    expect(run.partials.at(-1)?.tools[0]).toMatchObject({ status: "completed", output: "a.ts" });
+    expect(run.summaries).toEqual(["Bash ls: completed"]);
+  });
+
+  it("ends with an empty message when the turn ends during a burst", async () => {
+    const h = harness();
+    script(h.conn, [{ sessionUpdate: "tool_call", toolCallId: "t1", title: "ls", kind: "execute" }], {
+      stopReason: "end_turn",
+    });
+    const run = await h.loop([user("listá")]);
+    expect(run.segments).toHaveLength(2);
+    expect(run.segments[1]?.at(-1)).toMatchObject({ type: "done", reason: "stop", message: { content: [] } });
+  });
+
+  it("keeps a burst open across whitespace the model writes between tools", async () => {
+    const h = harness();
+    script(
+      h.conn,
+      [
+        { sessionUpdate: "tool_call", toolCallId: "t1", title: "Read a.ts", kind: "read" },
+        text("\n\n"),
+        { sessionUpdate: "tool_call", toolCallId: "t2", title: "Read b.ts", kind: "read" },
+      ],
+      { stopReason: "end_turn" },
+    );
+    const run = await h.loop([user("leé")]);
+    expect(run.bursts.map((burst) => burst.tools.map((tool) => tool.id))).toEqual([["t1", "t2"]]);
+  });
+
+  it("keeps what a subagent writes out of the message and inside its Task tool", async () => {
+    const h = harness();
+    const fromSubagent = { claudeCode: { parentToolUseId: "task" } };
+    script(
+      h.conn,
+      [
+        { sessionUpdate: "tool_call", toolCallId: "task", title: "buscar tests", kind: "think" },
+        { ...text("encontré C12"), _meta: fromSubagent },
+        {
+          sessionUpdate: "tool_call",
+          toolCallId: "t1",
+          title: "Read a.ts",
+          kind: "read",
+          _meta: fromSubagent,
+        },
+        text("Hecho."),
+      ],
+      { stopReason: "end_turn" },
+    );
+    const run = await h.loop([user("buscá")]);
+    expect(run.bursts[0]?.tools).toMatchObject([
+      { id: "task", subagentText: "encontré C12" },
+      { id: "t1", parentId: "task" },
+    ]);
+    expect(finalText(run.segments[1] ?? [])).toBe("Hecho.");
+  });
+
+  it("shows a tool as awaiting while its permission dialog is open and as rejected after a no", async () => {
+    const h = harness();
+    let answer: (response: RequestPermissionResponse) => void = () => {};
+    h.deps.decide = () => new Promise((resolve) => (answer = resolve));
+    h.conn.onPrompt = async (params, fake) => {
+      fake.emit(params.sessionId, {
+        sessionUpdate: "tool_call",
+        toolCallId: "t1",
+        title: "rm -rf dist",
+        kind: "execute",
+      });
+      await fake.requestPermission({
+        sessionId: params.sessionId,
+        toolCall: { toolCallId: "t1" },
+        options: [{ optionId: "no", name: "No", kind: "reject_once" }],
+      });
+      fake.emit(params.sessionId, { sessionUpdate: "tool_call_update", toolCallId: "t1", status: "failed" });
+      return { stopReason: "end_turn" };
+    };
+    const running = h.loop([user("borrá")]);
+    await until(() => h.deps.turns.live("pi-1")?.tools.get("t1").status === "awaiting");
+    answer({ outcome: { outcome: "selected", optionId: "no" } });
+    const run = await running;
+    expect(run.partials.map((details) => details.tools[0]?.status)).toContain("awaiting");
+    expect(run.bursts[0]?.tools[0]?.status).toBe("rejected");
+  });
+
+  it("names the tool in the permission request from its tool_call report", async () => {
+    const h = harness();
+    let asked: Promise<unknown> = Promise.resolve();
+    h.conn.onPrompt = async (params, fake) => {
+      fake.emit(params.sessionId, toolCall("t1", "Bash", "ls", { kind: "execute" }));
+      asked = fake.requestPermission({
+        sessionId: params.sessionId,
+        toolCall: { toolCallId: "t1", title: "ls" },
+        options: [],
+      });
+      await until(() => h.permissions.length > 0);
+      h.deps.turns.live("pi-1")?.cancel();
+      return { stopReason: "cancelled" };
+    };
+    await h.loop([user("listá")]);
+    await asked;
+    expect(h.permissions[0]?.toolCall._meta).toEqual({ claudeCode: { toolName: "Bash" } });
+  });
+
+  it("C20: an abort during a burst cancels the ACP turn and marks the open tools as interrupted", async () => {
+    const h = harness();
+    const controller = new AbortController();
+    h.conn.onPrompt = async (params, fake) => {
+      fake.emit(params.sessionId, {
+        sessionUpdate: "tool_call",
+        toolCallId: "t1",
+        title: "sleep 60",
+        kind: "execute",
+      });
+      const cancelled = fake.untilCancel();
+      setTimeout(() => controller.abort(), 0);
+      await cancelled;
+      return { stopReason: "cancelled" };
+    };
+    const run = await h.loop([user("esperá")], { sessionId: "pi-1", signal: controller.signal });
+    expect(h.conn.callsOf("cancel")).toHaveLength(1);
+    expect(run.bursts[0]?.tools[0]?.status).toBe("interrupted");
+    expect(run.segments.at(-1)?.at(-1)).toMatchObject({ type: "error", reason: "aborted" });
+    expect(h.deps.turns.live("pi-1")).toBeUndefined();
+  });
+
+  it("tells the extension when the agent changes its own mode", async () => {
+    const h = harness();
+    const modes: string[] = [];
+    h.deps.onModeChange = (modeId) => modes.push(modeId);
+    script(h.conn, [{ sessionUpdate: "current_mode_update", currentModeId: "plan" }, text("planifico")], {
+      stopReason: "end_turn",
+    });
+    await h.run([user("planificá")]);
+    expect(modes).toEqual(["plan"]);
+  });
+
+  it("sends every tool of the turn to the subagent widget as tools change", async () => {
+    const h = harness();
+    script(h.conn, [toolCall("task", "Task", "buscar tests", { kind: "think" }), text("Hecho.")], {
+      stopReason: "end_turn",
+    });
+    await h.loop([user("buscá")]);
+    expect(h.subagentTools.at(-1)).toMatchObject([{ id: "task", name: "Task", target: "buscar tests" }]);
+  });
+
+  it("C10: never splits a Pi internal call: its tool calls stay out of the message", async () => {
+    const h = harness();
+    script(
+      h.conn,
+      [{ sessionUpdate: "tool_call", toolCallId: "t1", title: "Read a.ts", kind: "read" }, text("resumen")],
+      { stopReason: "end_turn" },
+    );
+    const run = await h.loop([user("resumí")], { sessionId: "pi-internal" });
+    expect(run.segments).toHaveLength(1);
+    expect(finalText(run.segments[0] ?? [])).toBe("resumen");
+  });
+
+  it("C17: sends the plan to its live widget, not to the transcript", async () => {
     const h = harness();
     const plan = (status: "pending" | "in_progress" | "completed"): SessionUpdate => ({
       sessionUpdate: "plan",
@@ -219,7 +468,10 @@ describe("streamPrompt: content", () => {
     });
     script(h.conn, [plan("in_progress"), plan("completed"), text("Listo.")], { stopReason: "end_turn" });
     const output = finalText(await h.run([user("hacé")]));
-    expect(h.plans).toEqual([["Plan", "✓ Leer", "› Editar", "· Testear"], undefined]);
+    expect(h.plans.map((entries) => entries.map((entry) => entry.status))).toEqual([
+      ["completed", "in_progress", "pending"],
+      ["completed", "completed", "completed"],
+    ]);
     expect(output).toBe("Listo.");
   });
 
@@ -332,7 +584,7 @@ describe("streamPrompt: prompt", () => {
     expect(h.conn.callsOf("closeSession")).toHaveLength(1);
   });
 
-  it("shows session notices before the output", async () => {
+  it("sends session notices to Pi notifications instead of the transcript", async () => {
     const h = harness();
     h.conn.resumeFails = true;
     h.store.load("pi-1", [
@@ -347,15 +599,18 @@ describe("streamPrompt: prompt", () => {
     ]);
     script(h.conn, [text("hola")], { stopReason: "end_turn" });
     const output = finalText(await h.run([user("hola")]));
-    expect(output).toMatch(/^> No se pudo reanudar.*\n\nhola$/s);
+    expect(output).toBe("hola");
+    expect(h.notified).toEqual([copy.resumeFailed]);
   });
 });
 
 describe("streamPrompt: end of turn", () => {
-  it("C18: maps cancelled to an aborted error", async () => {
+  it("C18: ends normally when the agent stops its own turn as cancelled, as it does when the user keeps planning", async () => {
     const h = harness();
-    script(h.conn, [], { stopReason: "cancelled" });
-    expect((await h.run([user("hola")])).at(-1)).toMatchObject({ type: "error", reason: "aborted" });
+    script(h.conn, [text("sigo planificando")], { stopReason: "cancelled" });
+    const events = await h.run([user("hola")]);
+    expect(events.at(-1)).toMatchObject({ type: "done", reason: "stop" });
+    expect(h.conn.callsOf("cancel")).toEqual([]);
   });
 
   it.each(["max_tokens", "max_turn_requests", "refusal"] as const)(
@@ -386,11 +641,11 @@ describe("streamPrompt: end of turn", () => {
     expect(h.conn.callsOf("prompt")).toEqual([]);
   });
 
-  it("names the Claude Code version in other errors", async () => {
+  it("reports other errors without naming the agent", async () => {
     const h = harness();
     h.conn.promptError = new Error("model not available");
     const last = (await h.run([user("hola")])).at(-1);
-    expect(last?.type === "error" && last.error.errorMessage).toContain("2.1.285");
+    expect(last?.type === "error" && last.error.errorMessage).toBe("model not available");
   });
 
   it("C19: reads token usage from the prompt response and cost as the delta of the cumulative amount", async () => {
@@ -460,26 +715,5 @@ describe("streamPrompt: end of turn", () => {
     const events = await h.run([user("hola")], { sessionId: "pi-1", signal: controller.signal });
     expect(events.at(-1)).toMatchObject({ type: "error", reason: "aborted" });
     expect(h.conn.callsOf("prompt")).toEqual([]);
-  });
-});
-
-describe("truncateResult", () => {
-  it("keeps short results", () => {
-    expect(truncateResult("uno\ndos")).toBe("uno\ndos");
-  });
-
-  it("keeps the first 5 lines and counts the rest", () => {
-    const lines = Array.from({ length: 12 }, (_, i) => `l${i + 1}`).join("\n");
-    expect(truncateResult(lines)).toBe("l1\nl2\nl3\nl4\nl5\n… (+7 líneas)");
-  });
-
-  it("marks a cut inside the first lines and counts only the lines after them", () => {
-    const lines = ["a".repeat(300), "b".repeat(300), "c", "d", "e", "f"].join("\n");
-    expect(truncateResult(lines)).toBe(`${"a".repeat(300)}\n${"b".repeat(99)}…\n… (+1 líneas)`);
-  });
-
-  it("cuts a long result at 400 characters", () => {
-    const result = truncateResult("x".repeat(1000));
-    expect(result).toBe(`${"x".repeat(400)}…`);
   });
 });

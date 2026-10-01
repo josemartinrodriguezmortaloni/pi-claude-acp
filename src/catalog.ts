@@ -2,6 +2,7 @@ import type { SessionConfigOption, SessionConfigSelectOption } from "@agentclien
 import type { ThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
 import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import { errorText } from "./connection.ts";
+import { copy } from "./messages.ts";
 
 export const MODEL_CONFIG_ID = "model";
 export const EFFORT_CONFIG_ID = "effort";
@@ -134,13 +135,13 @@ export class Catalog {
   async #load(open: () => Promise<ProbeSession>, timeoutMs: number): Promise<string | undefined> {
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`sin respuesta en ${timeoutMs} ms`)), timeoutMs);
+      timer = setTimeout(() => reject(new Error(copy.noResponseWithin(timeoutMs))), timeoutMs);
     });
     try {
       await Promise.race([this.#probe(open), timeout]);
       return undefined;
     } catch (error) {
-      return `No se pudo leer el catálogo de Claude Code: ${errorText(error)}`;
+      return copy.catalogFailed(errorText(error));
     } finally {
       clearTimeout(timer);
     }

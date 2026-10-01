@@ -6,6 +6,7 @@ import { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import type * as acp from "@agentclientprotocol/sdk";
 import { client, ndJsonStream, PROTOCOL_VERSION } from "@agentclientprotocol/sdk";
+import { copy } from "./messages.ts";
 
 const VERSION_LINE = /^(\d+\.\d+\.\d+) \(Claude Code\)$/;
 const ADAPTER_ENTRY = join(
@@ -92,9 +93,7 @@ export async function resolveExecutable(env: ConnectionEnv): Promise<string> {
   if (env.CLAUDE_CODE_EXECUTABLE) return env.CLAUDE_CODE_EXECUTABLE;
   const found = await findOnPath(env.PATH);
   if (!found) {
-    throw new Error(
-      "No se encontró `claude` en el PATH. Definí CLAUDE_CODE_EXECUTABLE con la ruta del binario.",
-    );
+    throw new Error(copy.binaryNotFound);
   }
   return found;
 }
@@ -111,15 +110,12 @@ async function findOnPath(pathVariable = ""): Promise<string | undefined> {
 /** Checks that `exe` is the real Claude Code binary and returns its version. */
 export async function validateExecutable(exe: string): Promise<string> {
   if (!(await isExecutable(exe))) {
-    throw new Error(`El binario de Claude Code no existe o no es ejecutable: ${exe}`);
+    throw new Error(copy.binaryNotExecutable(exe));
   }
   const output = await versionOutput(exe);
   const version = parseVersion(output);
   if (!version) {
-    throw new Error(
-      `${exe} no es el binario de Claude Code: \`--version\` devolvió ${JSON.stringify(output)}. ` +
-        "Apuntá CLAUDE_CODE_EXECUTABLE al binario real, no a un wrapper.",
-    );
+    throw new Error(copy.notTheBinary(exe, output));
   }
   return version;
 }
@@ -198,7 +194,7 @@ export async function openConnection(
     })
     .catch(async (error: unknown) => {
       kill();
-      throw new Error(`El adaptador ACP no respondió: ${errorText(error)}\n${stderr()}`);
+      throw new Error(`${copy.adapterNoResponse(errorText(error))}\n${stderr()}`);
     });
   log(`adaptador iniciado: claude ${claudeVersion} (${exe})`);
   return {
@@ -237,8 +233,7 @@ function agentRequests(agent: acp.ClientContext, explain: (error: unknown) => Pr
 function exitError(child: ChildProcessWithoutNullStreams, stderr: () => string): Promise<Error> {
   return new Promise((resolve) => {
     child.once("close", (code, signal) => {
-      const how = code === null ? `señal ${signal}` : `código ${code}`;
-      resolve(new Error(`El adaptador ACP terminó (${how}).\n${lastLines(stderr(), STDERR_TAIL_LINES)}`));
+      resolve(new Error(`${copy.adapterExited(code, signal)}\n${lastLines(stderr(), STDERR_TAIL_LINES)}`));
     });
   });
 }

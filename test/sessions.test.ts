@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { McpServer } from "@agentclientprotocol/sdk";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
+import { copy } from "../src/messages.ts";
 import {
   type AcpSession,
   applyConfig,
@@ -28,6 +29,7 @@ function store() {
     mcpServers: async () => MCP,
     contextBlock: async (cwd) => `contexto de ${cwd}`,
     onConfig: (configOptions) => observed.push(configOptions),
+    mode: () => "default",
   });
   return { store: s, observed };
 }
@@ -126,7 +128,7 @@ describe("SessionStore.ensure", () => {
     s.load("pi-1", [recordEntry("acp-gone", null)]);
     const { session, notices } = await s.ensure(conn, "pi-1", "/work", anyBranch);
     expect(session.id).not.toBe("acp-gone");
-    expect(notices[0]).toContain("sin el historial previo");
+    expect(notices).toEqual([copy.resumeFailed]);
   });
 
   it("C7: opens a new session with a notice for a Pi fork, which copies the parent's record", async () => {
@@ -136,7 +138,7 @@ describe("SessionStore.ensure", () => {
     const { session, notices } = await s.ensure(conn, "pi-fork", "/work", anyBranch);
     expect(session.id).not.toBe("acp-parent");
     expect(conn.callsOf("resumeSession")).toEqual([]);
-    expect(notices[0]).toContain("el contexto de Claude Code se reinició");
+    expect(notices).toEqual([copy.branchDiverged]);
   });
 
   it("ignores a persisted record without the expected shape", async () => {
@@ -162,7 +164,7 @@ describe("SessionStore.ensure", () => {
     s.load("pi-1", [recordEntry("acp-saved", "leaf-old")]);
     const { session, notices } = await s.ensure(conn, "pi-1", "/work", (leafId) => leafId !== "leaf-old");
     expect(session.id).not.toBe("acp-saved");
-    expect(notices[0]).toContain("el contexto de Claude Code se reinició");
+    expect(notices).toEqual([copy.branchDiverged]);
     expect(conn.callsOf("resumeSession")).toEqual([]);
   });
 
@@ -324,6 +326,7 @@ describe("applyConfig failures", () => {
     expect(error.message).toContain("2.1.285");
     expect(error.message).toContain("/opt/claude");
     expect(error.message).toContain("opus, haiku");
+    expect(error.message).not.toContain("Claude Code");
     expect(conn.callsOf("setSessionConfigOption")).toEqual([]);
   });
 });

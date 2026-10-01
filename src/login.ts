@@ -1,12 +1,10 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import type { ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { copy } from "./messages.ts";
 import { usesClaudeAcp } from "./sessions.ts";
 
 export const LOGIN_COMMAND = "claude-login";
-export const LOGIN_HINT = `Claude Code no tiene una sesión iniciada. Ejecutá /${LOGIN_COMMAND} para iniciarla.`;
-const OUTSIDE_TUI = `/${LOGIN_COMMAND} necesita la TUI de Pi. Iniciá sesión ejecutando \`claude auth login\` en una terminal.`;
-const LOGGED_IN = "Claude Code tiene la sesión iniciada. El próximo turno usa la cuenta nueva.";
-const NOT_LOGGED_IN = `El login de Claude Code no se completó. Volvé a ejecutar /${LOGIN_COMMAND}.`;
+export const LOGIN_HINT = copy.loginHint(LOGIN_COMMAND);
 
 export type LoginState = "logged-in" | "logged-out" | "unknown";
 
@@ -62,7 +60,7 @@ export async function login(
   deps: LoginDeps,
 ) {
   if (ctx.mode !== "tui") {
-    ctx.ui.notify(OUTSIDE_TUI, "warning");
+    ctx.ui.notify(copy.loginOutsideTui(LOGIN_COMMAND), "warning");
     return;
   }
   await ctx.waitForIdle();
@@ -86,11 +84,11 @@ function onTerminal(ui: ExtensionCommandContext["ui"], task: () => Promise<numbe
 
 function report(ui: Pick<ExtensionCommandContext["ui"], "notify">, state: LoginState, deps: LoginDeps): void {
   if (state !== "logged-in") {
-    ui.notify(NOT_LOGGED_IN, "error");
+    ui.notify(copy.loginIncomplete(LOGIN_COMMAND), "error");
     return;
   }
   deps.restartAdapter();
-  ui.notify(LOGGED_IN, "info");
+  ui.notify(copy.loggedIn, "info");
 }
 
 /**

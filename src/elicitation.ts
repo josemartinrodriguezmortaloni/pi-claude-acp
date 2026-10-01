@@ -8,9 +8,8 @@ import type {
 } from "@agentclientprotocol/sdk";
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { oneAtATime } from "./dialogs.ts";
+import { copy } from "./messages.ts";
 
-const OWN_ANSWER = "Otra respuesta…";
-const DONE = "Listo";
 /** claude-agent-acp pairs each AskUserQuestion question with a free-text `<key>_custom` field (elicitation.js:131). */
 const CUSTOM_SUFFIX = "_custom";
 
@@ -142,14 +141,14 @@ async function askSelect(
 ): Promise<Content | undefined> {
   const options = choices(field.property);
   const label = await ui.select(field.title, selectLabels(field, options), { signal });
-  if (label !== OWN_ANSWER)
+  if (label !== copy.ownAnswer)
     return textAnswer(field.key, options.find((option) => option.label === label)?.value);
   return textAnswer(`${field.key}${CUSTOM_SUFFIX}`, await ui.input(field.title, undefined, { signal }));
 }
 
 function selectLabels(field: Field, options: Choice[]): string[] {
   const labels = options.map((option) => option.label);
-  return field.ownAnswer ? [...labels, OWN_ANSWER] : labels;
+  return field.ownAnswer ? [...labels, copy.ownAnswer] : labels;
 }
 
 async function askMulti(field: Field, ui: Ui, signal: AbortSignal | undefined): Promise<Content | undefined> {
@@ -166,8 +165,8 @@ async function pickMany(
   signal: AbortSignal | undefined,
 ): Promise<Set<string> | undefined> {
   const labels = options.map((option) => `${picked.has(option.value) ? "[x]" : "[ ]"} ${option.label}`);
-  const label = await ui.select(title, [...labels, DONE], { signal });
-  if (label === DONE) return picked;
+  const label = await ui.select(title, [...labels, copy.done], { signal });
+  if (label === copy.done) return picked;
   if (label === undefined) return undefined;
   return pickMany(title, options, toggle(picked, options[labels.indexOf(label)]), ui, signal);
 }

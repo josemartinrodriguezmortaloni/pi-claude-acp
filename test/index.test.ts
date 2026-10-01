@@ -3,6 +3,7 @@ import { createEventBus, type ExtensionAPI, type ProviderConfig } from "@earendi
 import { describe, expect, it } from "vitest";
 import type { AcpConnection, SharedConnection } from "../src/connection.ts";
 import { registerClaudeAcp } from "../src/index.ts";
+import { copy } from "../src/messages.ts";
 import { FakeConnection } from "./fake-connection.ts";
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
@@ -13,9 +14,12 @@ function fakePi(authStatus = '{"loggedIn": true}') {
   const entries: { customType: string; data: unknown }[] = [];
   const commands = new Map<string, { description?: string }>();
   const executed: string[] = [];
+  const tools: { name: string }[] = [];
   const pi = {
     registerProvider: (_name: string, config: ProviderConfig) => providers.push(config),
     registerCommand: (name: string, options: { description?: string }) => commands.set(name, options),
+    registerTool: (tool: { name: string }) => tools.push(tool),
+    registerShortcut: () => {},
     on: (event: string, handler: Handler) => handlers.set(event, handler),
     appendEntry: (customType: string, data: unknown) => entries.push({ customType, data }),
     getCommands: () => [],
@@ -25,7 +29,7 @@ function fakePi(authStatus = '{"loggedIn": true}') {
     },
     events: createEventBus(),
   } as unknown as ExtensionAPI;
-  return { pi, providers, handlers, entries, commands, executed };
+  return { pi, providers, handlers, entries, commands, executed, tools };
 }
 
 function fakeCtx(notified: string[] = []) {
@@ -33,7 +37,12 @@ function fakeCtx(notified: string[] = []) {
     cwd: "/work",
     hasUI: false,
     model: { provider: "claude-acp" },
-    ui: { notify: (message: string) => notified.push(message), setWidget: () => {} },
+    ui: {
+      notify: (message: string) => notified.push(message),
+      setWidget: () => {},
+      setStatus: () => {},
+      theme: { fg: (_color: string, text: string) => text },
+    },
     sessionManager: {
       getSessionId: () => "pi-1",
       getEntries: () => [],
@@ -94,7 +103,7 @@ describe("registerClaudeAcp", () => {
 
   it("registers /claude-login", async () => {
     const { commands } = await setup();
-    expect(commands.get("claude-login")?.description).toContain("Claude Code");
+    expect(commands.get("claude-login")?.description).toBe(copy.loginCommandDescription);
   });
 
   it("C6: persists the ACP session after each turn", async () => {

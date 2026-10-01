@@ -7,6 +7,8 @@ import type {
 } from "@agentclientprotocol/sdk";
 import type { EventBus, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { oneAtATime } from "./dialogs.ts";
+import { copy } from "./messages.ts";
+import { approvePlan, isPlanApproval, type PlanContext } from "./plan-approval.ts";
 
 /** Channel on `pi.events` where validator plugins vote on each Claude Code tool call. */
 export const TOOL_REQUEST_EVENT = "claude-acp:tool-request";
@@ -29,9 +31,12 @@ export interface ToolRequest {
 export interface DecideContext {
   events: Pick<EventBus, "emit">;
   /** Undefined when Pi has no dialog UI (`ctx.hasUI === false`). */
-  ui: Pick<ExtensionUIContext, "select"> | undefined;
+  ui: Pick<ExtensionUIContext, "select" | "input"> | undefined;
   /** Aborts when the turn is cancelled. */
   signal?: AbortSignal;
+  /** Whether the session mode approves this tool call without a dialog. Validators still vote first. */
+  autoApproves(toolCall: ToolCallUpdate): boolean;
+  plan: Pick<PlanContext, "acceptEditsAfterApproval" | "sendFeedback">;
 }
 
 type Verdict = (
@@ -46,8 +51,17 @@ const VERDICTS: Record<Vote, Verdict> = {
   ask: (ctx, toolCall, options) => askUser(ctx, toolCall, options),
 };
 
-/** Answers a Claude Code permission request. Only validators or the user can approve. */
+/** Answers a permission request of the agent. A plan approval is the user's alone. */
 export async function decide(
+  request: RequestPermissionRequest,
+  ctx: DecideContext,
+): Promise<RequestPermissionResponse> {
+  if (isPlanApproval(request)) return approvePlan(request, { ...ctx.plan, ui: ctx.ui, signal: ctx.signal });
+  return decideTool(request, ctx);
+}
+
+/** Only validators, the session mode or the user can approve a tool call. */
+async function decideTool(
   request: RequestPermissionRequest,
   ctx: DecideContext,
 ): Promise<RequestPermissionResponse> {
@@ -55,7 +69,13 @@ export async function decide(
   const options = request.options.filter(offerable);
   const votes = await collectVotes(ctx, request.toolCall, options);
   if (isAborted(ctx.signal)) return CANCELLED;
-  return VERDICTS[combine(votes)](ctx, request.toolCall, options);
+  return VERDICTS[verdictFor(votes, ctx, request.toolCall)](ctx, request.toolCall, options);
+}
+
+/** A deny always wins; the mode only answers what would otherwise reach the user. */
+function verdictFor(votes: Vote[], ctx: DecideContext, toolCall: ToolCallUpdate): Vote {
+  const vote = combine(votes);
+  return vote === "ask" && ctx.autoApproves(toolCall) ? "allow" : vote;
 }
 
 function offerable(option: PermissionOption): boolean {
@@ -130,11 +150,13 @@ function selected(option: PermissionOption): RequestPermissionResponse {
 }
 
 function dialogTitle(toolCall: ToolCallUpdate): string {
-  return [`Claude Code quiere usar ${toolName(toolCall)}`, toolDetail(toolCall)].filter(Boolean).join("\n");
+  return copy.permissionTitle(toolName(toolCall), toolDetail(toolCall));
 }
 
+/** The tool's own name ("Bash", "Read"): the adapter's title already repeats the command or path. */
 function toolName(toolCall: ToolCallUpdate): string {
-  return toolCall.title || toolCall.name || "una herramienta";
+  const meta = Object(Object(toolCall._meta).claudeCode) as { toolName?: unknown };
+  return firstString([meta.toolName, toolCall.title]) || copy.unknownTool;
 }
 
 /** The command or path the tool acts on. */
@@ -145,5 +167,5 @@ function toolDetail(toolCall: ToolCallUpdate): string {
 }
 
 function firstString(values: unknown[]): string {
-  return String(values.find((value) => typeof value === "string") ?? "");
+  return String(values.find((value) => typeof value === "string" && value !== "") ?? "");
 }

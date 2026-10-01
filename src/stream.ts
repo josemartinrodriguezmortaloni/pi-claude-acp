@@ -9,27 +9,34 @@ import {
   type SimpleStreamOptions,
   type TextContent,
   type ThinkingContent,
+  type ToolCall,
   type TranscriptContext,
   type Usage,
   type UserMessage,
 } from "@earendil-works/pi-ai";
+import { ACTIVITY_TOOL } from "./activity.ts";
+import type { ToolEntry } from "./burst.ts";
 import { type AcpConnection, errorText, type Log } from "./connection.ts";
 import { LOGIN_HINT } from "./login.ts";
+import { copy } from "./messages.ts";
+import type { Reasoning } from "./reasoning.ts";
 import type { AcpSession, OpenTurn, TurnRequest } from "./sessions.ts";
+import { type Activity, type LiveTurn, onAbort, type TurnEvent, type TurnRegistry } from "./turn.ts";
 
-const MAX_RESULT_LINES = 5;
-const MAX_RESULT_CHARS = 400;
 const AUTH_REQUIRED_CODE = -32000;
-const TOOL_MARKS: Record<string, string> = { completed: "✓ completed", failed: "✗ failed" };
-/** Distinct shapes, so the status reads without color. */
-const PLAN_MARKS: Record<acp.PlanEntryStatus, string> = { completed: "✓", in_progress: "›", pending: "·" };
+/** Updates that carry the model's own words. */
+const MODEL_TEXT = new Set<acp.SessionUpdate["sessionUpdate"]>([
+  "agent_message_chunk",
+  "agent_thought_chunk",
+]);
 
 type BlockKind = "text" | "thinking";
+type Push = (events: AssistantMessageEvent[]) => void;
 
-export interface TurnState {
+/** One Pi assistant message: the part of the turn between two bursts. */
+export interface SegmentState {
   readonly message: AssistantMessage;
   open?: { index: number; block: TextContent | ThinkingContent };
-  readonly finishedTools: Set<string>;
 }
 
 export interface StreamDeps {
@@ -40,14 +47,30 @@ export interface StreamDeps {
   ): Promise<T>;
   decide(request: acp.RequestPermissionRequest, signal?: AbortSignal): Promise<acp.RequestPermissionResponse>;
   elicit(request: acp.CreateElicitationRequest, signal?: AbortSignal): Promise<acp.CreateElicitationResponse>;
-  /** Shows Claude Code's plan as a live widget; undefined clears it. */
-  showPlan(lines: string[] | undefined): void;
+  /** Shows a session notice outside the transcript. */
+  notify(message: string): void;
+  /** Shows the agent's plan in a live widget. */
+  showPlan(entries: acp.PlanEntry[]): void;
+  /** Shows the turn's subagents in a live widget, from every tool of the turn. */
+  showSubagents(tools: ToolEntry[]): void;
   onContextWindow(modelId: string, size: number): void;
   noteCompaction(session: AcpSession, update: acp.CompactionUpdate): void;
+  /** The agent changed its own mode: it entered plan mode, or a plan approval left it. */
+  onModeChange(modeId: string): void;
+  turns: TurnRegistry;
+  /** Whether `sessionId` names the Pi session of the agent loop. Other requests are internal calls. */
+  isAgentSession(sessionId: string | undefined): boolean;
   log: Log;
 }
 
-export function createTurnState(model: Model<Api>): TurnState {
+interface Segment {
+  state: SegmentState;
+  turn: LiveTurn;
+  deps: StreamDeps;
+  push: Push;
+}
+
+export function createSegmentState(model: Model<Api>): SegmentState {
   return {
     message: {
       role: "assistant",
@@ -59,11 +82,13 @@ export function createTurnState(model: Model<Api>): TurnState {
       stopReason: "pending",
       timestamp: Date.now(),
     },
-    finishedTools: new Set(),
   };
 }
 
-/** Pi's `streamSimple` for claude-acp: one ACP prompt turn as a Pi assistant message. */
+/**
+ * Pi's `streamSimple` for claude-acp. The first call of a Pi turn opens the ACP turn; every call
+ * after an activity tool result continues it (docs/adr/0001).
+ */
 export function streamPrompt(
   model: Model<Api>,
   context: TranscriptContext,
@@ -71,91 +96,148 @@ export function streamPrompt(
   deps: StreamDeps,
 ): AssistantMessageEventStream {
   const stream = createAssistantMessageEventStream();
-  const state = createTurnState(model);
+  const state = createSegmentState(model);
   const push = (events: AssistantMessageEvent[]) => {
     for (const event of events) stream.push(event);
   };
   stream.push({ type: "start", partial: state.message });
-  runTurn(state, context, options ?? {}, deps, push).then((last) => {
-    stream.push(last);
-    stream.end();
-  });
+  startSegment(state, context, options ?? {}, deps, push)
+    .catch((error: unknown) => failEvent(state, abortReason(options?.signal), errorText(error)))
+    .then((last) => {
+      stream.push(last);
+      stream.end();
+    });
   return stream;
 }
 
-async function runTurn(
-  state: TurnState,
+async function startSegment(
+  state: SegmentState,
   context: TranscriptContext,
   options: SimpleStreamOptions,
   deps: StreamDeps,
-  push: (events: AssistantMessageEvent[]) => void,
+  push: Push,
 ): Promise<AssistantMessageEvent> {
-  return startTurn(state, context, options, deps, push).catch((error: unknown) =>
-    failEvent(state, abortReason(options.signal), errorText(error)),
-  );
+  const live = deps.turns.live(options.sessionId);
+  if (isAborted(options.signal)) return abandon(state, live, deps);
+  const turn = live ?? (await openTurn(state, context, options, deps));
+  return runSegment({ state, turn, deps, push }, options.signal);
 }
 
-async function startTurn(
-  state: TurnState,
+function isAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
+}
+
+/** Pi stopped before this call started: the live turn, if any, ends with it. */
+function abandon(state: SegmentState, live: LiveTurn | undefined, deps: StreamDeps): AssistantMessageEvent {
+  if (live?.key) deps.turns.discard(live.key);
+  return failEvent(state, "aborted", copy.turnCancelled);
+}
+
+/** Starts the ACP prompt in the background; its events reach the segment through the turn queue. */
+async function openTurn(
+  state: SegmentState,
   context: TranscriptContext,
   options: SimpleStreamOptions,
   deps: StreamDeps,
-  push: (events: AssistantMessageEvent[]) => void,
-): Promise<AssistantMessageEvent> {
-  if (options.signal?.aborted) return failEvent(state, "aborted", "Turno cancelado.");
+): Promise<LiveTurn> {
   const blocks = lastUserBlocks(context);
   const conn = await deps.connect();
   requireImageSupport(conn, blocks);
-  const request = { conn, requestSessionId: options.sessionId, modelId: state.message.model, blocks };
-  return deps
-    .withTurn({ ...request, level: options.reasoning }, (turn) =>
-      promptTurn(state, turn, options.signal, deps, push),
-    )
-    .catch((error: unknown) =>
-      failEvent(state, abortReason(options.signal), describeError(error, conn.claudeVersion)),
-    );
-}
-
-function abortReason(signal: AbortSignal | undefined): "aborted" | "error" {
-  return signal?.aborted ? "aborted" : "error";
-}
-
-async function promptTurn(
-  state: TurnState,
-  turn: OpenTurn,
-  signal: AbortSignal | undefined,
-  deps: StreamDeps,
-  push: (events: AssistantMessageEvent[]) => void,
-): Promise<AssistantMessageEvent> {
-  if (signal?.aborted) return failEvent(state, "aborted", "Turno cancelado.");
-  push(turn.notices.flatMap((notice) => appendParagraph(state, `> ${notice}`)));
-  const { session } = turn;
-  const costBefore = session.costTotal;
-  const unlisten = session.conn.listen(session.id, {
-    update: (update) => push(handleUpdate(update, state, session, deps)),
-    permission: (request) => decideLogged(request, signal, deps),
-    elicit: (request) => deps.elicit(request, signal),
-  });
-  const stopCancelling = onAbort(signal, () => {
-    session.conn.agent.cancel({ sessionId: session.id }).catch((error: unknown) => {
-      deps.log(`cancel falló: ${errorText(error)}`);
+  const modelId = state.message.model;
+  const turn = deps.turns.open(options.sessionId, deps.isAgentSession(options.sessionId), modelId, (tools) =>
+    deps.showSubagents(tools),
+  );
+  const request = { conn, requestSessionId: options.sessionId, modelId, level: options.reasoning, blocks };
+  deps
+    .withTurn(request, (opened) => promptInto(turn, opened, deps))
+    .catch((error: unknown) => {
+      turn.tools.interruptOpen();
+      turn.events.push({ kind: "error", error });
     });
+  return turn;
+}
+
+async function promptInto(turn: LiveTurn, opened: OpenTurn, deps: StreamDeps): Promise<void> {
+  opened.notices.forEach((notice) => {
+    deps.notify(notice);
+  });
+  if (turn.signal.aborted)
+    return turn.events.push({ kind: "end", response: { stopReason: "cancelled" }, cost: 0 });
+  const { session } = opened;
+  const costBefore = session.costTotal;
+  turn.onCancel(() => cancelPrompt(session, deps));
+  const unlisten = session.conn.listen(session.id, {
+    update: (update) => receive(update, turn, session, deps),
+    permission: (request) => decideFor(turn, request, deps),
+    elicit: (request) => deps.elicit(request, turn.signal),
   });
   try {
-    const response = await session.conn.agent.prompt({ sessionId: session.id, prompt: turn.prompt });
-    push(closeBlock(state));
-    state.message.usage = toUsage(response.usage, session.costTotal - costBefore);
-    return stopEvent(state, response.stopReason);
+    const response = await session.conn.agent.prompt({ sessionId: session.id, prompt: opened.prompt });
+    if (response.stopReason === "cancelled") turn.tools.interruptOpen();
+    turn.events.push({ kind: "end", response, cost: session.costTotal - costBefore });
   } finally {
     unlisten();
-    stopCancelling();
   }
+}
+
+function cancelPrompt(session: AcpSession, deps: StreamDeps): void {
+  session.conn.agent.cancel({ sessionId: session.id }).catch((error: unknown) => {
+    deps.log(`cancel falló: ${errorText(error)}`);
+  });
+}
+
+/** Session effects apply at once; tool reports update the book at once and keep their place in the queue. */
+function receive(update: acp.SessionUpdate, turn: LiveTurn, session: AcpSession, deps: StreamDeps): void {
+  const effect = SESSION_EFFECTS[update.sessionUpdate] as
+    | SessionEffect<typeof update.sessionUpdate>
+    | undefined;
+  if (effect) {
+    effect(update as never, turn, session, deps);
+    return;
+  }
+  if (isToolReport(update)) turn.tools.report(update);
+  turn.events.push({ kind: "update", update });
+}
+
+function isToolReport(
+  update: acp.SessionUpdate,
+): update is Extract<acp.SessionUpdate, { sessionUpdate: "tool_call" | "tool_call_update" }> {
+  return update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update";
+}
+
+/** The book shows the tool as awaiting while the dialog is open, and as rejected when the answer is no. */
+async function decideFor(
+  turn: LiveTurn,
+  request: acp.RequestPermissionRequest,
+  deps: StreamDeps,
+): Promise<acp.RequestPermissionResponse> {
+  const id = request.toolCall.toolCallId;
+  turn.tools.mark(id, "awaiting");
+  const response = await decideLogged(withToolName(request, turn.tools.get(id).name), turn.signal, deps);
+  turn.tools.mark(id, rejects(request, response) ? "rejected" : "pending");
+  return response;
+}
+
+/**
+ * The adapter's permission request carries no tool name (only the title, which for Bash is the command
+ * itself); the dialog takes it from the tool_call report.
+ */
+function withToolName(request: acp.RequestPermissionRequest, toolName: string): acp.RequestPermissionRequest {
+  const meta = Object(request.toolCall._meta) as Record<string, unknown>;
+  const claudeCode = { toolName, ...Object(meta.claudeCode) };
+  return { ...request, toolCall: { ...request.toolCall, _meta: { ...meta, claudeCode } } };
+}
+
+function rejects(request: acp.RequestPermissionRequest, response: acp.RequestPermissionResponse): boolean {
+  const outcome = response.outcome;
+  const optionId = outcome.outcome === "selected" ? outcome.optionId : undefined;
+  return request.options.some((option) => option.optionId === optionId && option.kind.startsWith("reject"));
 }
 
 /** Every permission request and its answer go to the log: a pending one is what hangs a turn. */
 async function decideLogged(
   request: acp.RequestPermissionRequest,
-  signal: AbortSignal | undefined,
+  signal: AbortSignal,
   deps: StreamDeps,
 ): Promise<acp.RequestPermissionResponse> {
   const tool = request.toolCall.title ?? request.toolCall.toolCallId;
@@ -168,44 +250,215 @@ async function decideLogged(
   return response;
 }
 
-/** Runs `action` once if `signal` aborts; the returned function stops watching. */
-function onAbort(signal: AbortSignal | undefined, action: () => void): () => void {
-  signal?.addEventListener("abort", action, { once: true });
-  return () => signal?.removeEventListener("abort", action);
-}
-
 type SessionEffect<K extends acp.SessionUpdate["sessionUpdate"]> = (
   update: Extract<acp.SessionUpdate, { sessionUpdate: K }>,
-  state: TurnState,
+  turn: LiveTurn,
   session: AcpSession,
   deps: StreamDeps,
 ) => void;
 
-/** Updates that change the session instead of the message. */
+/** Updates that change the session or the UI around the transcript, never the transcript. */
 const SESSION_EFFECTS: { [K in acp.SessionUpdate["sessionUpdate"]]?: SessionEffect<K> } = {
-  usage_update: (update, state, session, deps) => {
+  usage_update: (update, turn, session, deps) => {
     if (update.cost) session.costTotal = update.cost.amount;
-    deps.onContextWindow(state.message.model, update.size);
+    deps.onContextWindow(turn.modelId, update.size);
   },
-  compaction_update: (update, _state, session, deps) => deps.noteCompaction(session, update),
-  plan: (update, _state, _session, deps) => deps.showPlan(planWidget(update.entries)),
+  compaction_update: (update, _turn, session, deps) => deps.noteCompaction(session, update),
+  current_mode_update: (update, _turn, _session, deps) => deps.onModeChange(update.currentModeId),
+  plan: (update, _turn, _session, deps) => deps.showPlan(update.entries),
 };
 
-function handleUpdate(
-  update: acp.SessionUpdate,
-  state: TurnState,
-  session: AcpSession,
-  deps: StreamDeps,
-): AssistantMessageEvent[] {
-  const effect = SESSION_EFFECTS[update.sessionUpdate] as
-    | SessionEffect<typeof update.sessionUpdate>
-    | undefined;
-  if (!effect) return mapOrLog(update, state, deps);
-  effect(update as never, state, session, deps);
-  return [];
+/** Streams one Pi assistant message until the turn ends or a burst starts. */
+async function runSegment(segment: Segment, signal: AbortSignal | undefined): Promise<AssistantMessageEvent> {
+  const stopCancelling = onAbort(signal, () => segment.turn.cancel());
+  try {
+    return await readSegment(segment);
+  } finally {
+    stopCancelling();
+  }
 }
 
-function mapOrLog(update: acp.SessionUpdate, state: TurnState, deps: StreamDeps): AssistantMessageEvent[] {
+async function readSegment(segment: Segment): Promise<AssistantMessageEvent> {
+  for (;;) {
+    const last = segmentStep(await segment.turn.events.next(), segment);
+    if (last) return last;
+  }
+}
+
+function segmentStep(event: TurnEvent, segment: Segment): AssistantMessageEvent | undefined {
+  return STEPS[event.kind](event as never, segment);
+}
+
+const STEPS: {
+  [K in TurnEvent["kind"]]: (
+    event: Extract<TurnEvent, { kind: K }>,
+    segment: Segment,
+  ) => AssistantMessageEvent | undefined;
+} = {
+  update: (event, segment) => segmentUpdate(event.update, segment),
+  end: (event, segment) => endTurn(event, segment),
+  error: (event, segment) => failTurn(event.error, segment),
+};
+
+function segmentUpdate(update: acp.SessionUpdate, segment: Segment): AssistantMessageEvent | undefined {
+  if (isSubagent(update)) return undefined;
+  const open = activityOpener(update, segment.turn);
+  if (open) return open(update as never, segment);
+  segment.push(mapOrLog(update, segment.state, segment.deps));
+  return undefined;
+}
+
+type Opener<K extends acp.SessionUpdate["sessionUpdate"]> = (
+  update: Extract<acp.SessionUpdate, { sessionUpdate: K }>,
+  segment: Segment,
+) => AssistantMessageEvent;
+
+/** In an agent turn, a tool call opens a burst and a thought opens a run of reasoning. */
+const OPENERS: { [K in acp.SessionUpdate["sessionUpdate"]]?: Opener<K> } = {
+  tool_call: (update, segment) => openBurst(update.toolCallId, segment),
+  agent_thought_chunk: (update, segment) => openReasoning(chunkText(update), segment),
+};
+
+function activityOpener(update: acp.SessionUpdate, turn: LiveTurn) {
+  return turn.segmented
+    ? (OPENERS[update.sessionUpdate] as Opener<typeof update.sessionUpdate> | undefined)
+    : undefined;
+}
+
+/** The burst collects the tools until the model writes again. */
+function openBurst(toolCallId: string, segment: Segment): AssistantMessageEvent {
+  const burst = segment.turn.startBurst(toolCallId);
+  void fillBurst(segment.turn);
+  return closeWithActivity(burst, segment);
+}
+
+/** The reasoning collects thoughts until the model does something else. */
+function openReasoning(text: string, segment: Segment): AssistantMessageEvent {
+  const reasoning = segment.turn.startReasoning();
+  reasoning.add(text);
+  void fillReasoning(segment.turn, reasoning);
+  return closeWithActivity(reasoning, segment);
+}
+
+/** Ends this Pi message with the activity tool call that shows `activity`. */
+function closeWithActivity(activity: Activity, segment: Segment): AssistantMessageEvent {
+  const { state, turn, deps, push } = segment;
+  push(closeBlock(state));
+  deps.turns.addActivity(activity, turn);
+  const toolCall: ToolCall = { type: "toolCall", id: activity.id, name: ACTIVITY_TOOL, arguments: {} };
+  const contentIndex = state.message.content.push(toolCall) - 1;
+  push([
+    { type: "toolcall_start", contentIndex, partial: state.message },
+    { type: "toolcall_end", contentIndex, toolCall, partial: state.message },
+  ]);
+  state.message.stopReason = "toolUse";
+  return { type: "done", reason: "toolUse", message: state.message };
+}
+
+/** Adds the tools the agent starts to the open burst, until the model writes again or the turn ends. */
+async function fillBurst(turn: LiveTurn): Promise<void> {
+  for (;;) {
+    const event = await turn.events.next();
+    if (!continuesBurst(event)) return closeActivity(turn, event);
+    burstUpdate(event.update, turn);
+  }
+}
+
+/** Adds the model's thoughts to the open reasoning, until it does anything else or the turn ends. */
+async function fillReasoning(turn: LiveTurn, reasoning: Reasoning): Promise<void> {
+  for (;;) {
+    const event = await turn.events.next();
+    if (!continuesReasoning(event)) return closeActivity(turn, event);
+    reasoning.add(chunkText(event.update));
+  }
+}
+
+/** `event` belongs to what comes next: it goes back to the queue. */
+function closeActivity(turn: LiveTurn, event: TurnEvent): void {
+  turn.events.putBack(event);
+  turn.endActivity();
+}
+
+function continuesReasoning(event: TurnEvent): event is Extract<TurnEvent, { kind: "update" }> {
+  return event.kind === "update" && isMainThought(event.update);
+}
+
+function isMainThought(update: acp.SessionUpdate): boolean {
+  return update.sessionUpdate === "agent_thought_chunk" && !isSubagent(update);
+}
+
+/** Tool reports and subagent output keep a burst open; the model's own words or the turn end close it. */
+function continuesBurst(event: TurnEvent): event is Extract<TurnEvent, { kind: "update" }> {
+  return event.kind === "update" && !isModelText(event.update);
+}
+
+/** Text of the main agent. Whitespace alone does not end a burst. */
+function isModelText(update: acp.SessionUpdate): boolean {
+  return MODEL_TEXT.has(update.sessionUpdate) && !isSubagent(update) && chunkText(update).trim() !== "";
+}
+
+function burstUpdate(update: acp.SessionUpdate, turn: LiveTurn): void {
+  const step = BURST_UPDATES[update.sessionUpdate] as BurstStep<typeof update.sessionUpdate> | undefined;
+  step?.(update as never, turn);
+}
+
+type BurstStep<K extends acp.SessionUpdate["sessionUpdate"]> = (
+  update: Extract<acp.SessionUpdate, { sessionUpdate: K }>,
+  turn: LiveTurn,
+) => void;
+
+/** A burst takes in the tools that start and what subagents write; everything else passes by. */
+const BURST_UPDATES: { [K in acp.SessionUpdate["sessionUpdate"]]?: BurstStep<K> } = {
+  tool_call: (update, turn) => turn.burst?.add(update.toolCallId),
+  agent_message_chunk: (update, turn) => addSubagentText(update, turn),
+};
+
+function addSubagentText(update: acp.SessionUpdate, turn: LiveTurn): void {
+  const parentId = parentToolUseId(update);
+  if (parentId) turn.tools.addSubagentText(parentId, chunkText(update));
+}
+
+/** claude-agent-acp stamps everything a subagent emits with its Task tool id (acp-agent.js:483-491). */
+function parentToolUseId(update: acp.SessionUpdate): string | undefined {
+  const id = Object(Object(Object(update)._meta).claudeCode).parentToolUseId;
+  return typeof id === "string" ? id : undefined;
+}
+
+function isSubagent(update: acp.SessionUpdate): boolean {
+  return parentToolUseId(update) !== undefined;
+}
+
+function chunkText(update: acp.SessionUpdate): string {
+  const content = Object(update).content as acp.ContentBlock | undefined;
+  return content?.type === "text" ? content.text : "";
+}
+
+function endTurn(event: Extract<TurnEvent, { kind: "end" }>, segment: Segment): AssistantMessageEvent {
+  const { state, turn, deps, push } = segment;
+  push(closeBlock(state));
+  deps.turns.close(turn);
+  state.message.usage = toUsage(event.response.usage, event.cost);
+  return stopEvent(state, stopReasonOf(event.response.stopReason, turn));
+}
+
+/**
+ * A turn the user did not cancel can still end "cancelled": the adapter stops it on purpose when the
+ * user keeps planning (permissions/effects.js:107-111). That is a normal end.
+ */
+function stopReasonOf(reason: acp.StopReason, turn: LiveTurn): acp.StopReason {
+  return reason === "cancelled" && !turn.signal.aborted ? "end_turn" : reason;
+}
+
+function failTurn(error: unknown, segment: Segment): AssistantMessageEvent {
+  segment.deps.turns.close(segment.turn);
+  return failEvent(segment.state, abortReason(segment.turn.signal), describeError(error));
+}
+
+function abortReason(signal: AbortSignal | undefined): "aborted" | "error" {
+  return signal?.aborted ? "aborted" : "error";
+}
+
+function mapOrLog(update: acp.SessionUpdate, state: SegmentState, deps: StreamDeps): AssistantMessageEvent[] {
   const events = mapUpdate(update, state);
   if (!events) deps.log(`update ignorado: ${update.sessionUpdate}`);
   return events ?? [];
@@ -213,32 +466,40 @@ function mapOrLog(update: acp.SessionUpdate, state: TurnState, deps: StreamDeps)
 
 type Handler<K extends acp.SessionUpdate["sessionUpdate"]> = (
   update: Extract<acp.SessionUpdate, { sessionUpdate: K }>,
-  state: TurnState,
+  state: SegmentState,
 ) => AssistantMessageEvent[];
 
+/** Tool reports already live in the turn's tool book; outside a burst they add nothing to the message. */
 const HANDLERS: { [K in acp.SessionUpdate["sessionUpdate"]]?: Handler<K> } = {
   agent_message_chunk: (update, state) => appendChunk(state, "text", update.content),
   agent_thought_chunk: (update, state) => appendChunk(state, "thinking", update.content),
-  tool_call: (update, state) => appendParagraph(state, `▸ ${update.title}`),
-  tool_call_update: (update, state) => finishTool(update, state),
+  tool_call: () => [],
+  tool_call_update: () => [],
 };
 
 /** Maps one ACP update to Pi events and updates `state`. Undefined means the update type is ignored. */
-export function mapUpdate(update: acp.SessionUpdate, state: TurnState): AssistantMessageEvent[] | undefined {
+export function mapUpdate(
+  update: acp.SessionUpdate,
+  state: SegmentState,
+): AssistantMessageEvent[] | undefined {
   const handler = HANDLERS[update.sessionUpdate] as Handler<typeof update.sessionUpdate> | undefined;
   return handler?.(update as never, state);
 }
 
-function appendChunk(state: TurnState, kind: BlockKind, content: acp.ContentBlock): AssistantMessageEvent[] {
+function appendChunk(
+  state: SegmentState,
+  kind: BlockKind,
+  content: acp.ContentBlock,
+): AssistantMessageEvent[] {
   return content.type === "text" ? append(state, kind, content.text) : [];
 }
 
-function append(state: TurnState, kind: BlockKind, delta: string): AssistantMessageEvent[] {
+function append(state: SegmentState, kind: BlockKind, delta: string): AssistantMessageEvent[] {
   const opening = state.open?.block.type === kind ? [] : [...closeBlock(state), openBlock(state, kind)];
   return [...opening, ...growBlock(state, delta)];
 }
 
-function openBlock(state: TurnState, kind: BlockKind): AssistantMessageEvent {
+function openBlock(state: SegmentState, kind: BlockKind): AssistantMessageEvent {
   const block =
     kind === "text" ? { type: "text" as const, text: "" } : { type: "thinking" as const, thinking: "" };
   const contentIndex = state.message.content.push(block) - 1;
@@ -246,7 +507,7 @@ function openBlock(state: TurnState, kind: BlockKind): AssistantMessageEvent {
   return { type: `${kind}_start`, contentIndex, partial: state.message };
 }
 
-function growBlock(state: TurnState, delta: string): AssistantMessageEvent[] {
+function growBlock(state: SegmentState, delta: string): AssistantMessageEvent[] {
   const open = state.open;
   if (!open) return [];
   const event = { contentIndex: open.index, delta, partial: state.message };
@@ -258,7 +519,7 @@ function growBlock(state: TurnState, delta: string): AssistantMessageEvent[] {
   return [{ type: "thinking_delta", ...event }];
 }
 
-export function closeBlock(state: TurnState): AssistantMessageEvent[] {
+export function closeBlock(state: SegmentState): AssistantMessageEvent[] {
   const open = state.open;
   state.open = undefined;
   return open ? [endEvent(open.index, open.block, state.message)] : [];
@@ -274,85 +535,18 @@ function endEvent(
     : { type: "thinking_end", contentIndex, content: block.thinking, partial };
 }
 
-/** Appends `paragraph` as its own Markdown paragraph of the current text block. */
-function appendParagraph(state: TurnState, paragraph: string): AssistantMessageEvent[] {
-  const current = state.open?.block.type === "text" ? state.open.block.text : "";
-  return append(state, "text", `${separatorAfter(current)}${paragraph}\n\n`);
-}
-
-function separatorAfter(text: string): string {
-  if (text === "") return "";
-  return "\n\n".slice(/\n{0,2}$/.exec(text)?.[0].length);
-}
-
-function finishTool(update: acp.ToolCallUpdate, state: TurnState): AssistantMessageEvent[] {
-  const mark = TOOL_MARKS[String(update.status)];
-  if (!mark || state.finishedTools.has(update.toolCallId)) return [];
-  state.finishedTools.add(update.toolCallId);
-  return appendParagraph(state, withResult(mark, toolOutput(update)));
-}
-
-function toolOutput(update: acp.ToolCallUpdate): string {
-  return (update.content ?? []).flatMap(contentText).join("\n") || rawText(update.rawOutput);
-}
-
-function contentText(content: acp.ToolCallContent): string[] {
-  return content.type === "content" && content.content.type === "text" ? [content.content.text] : [];
-}
-
-function rawText(raw: unknown): string {
-  return typeof raw === "string" ? raw : "";
-}
-
-function withResult(mark: string, output: string): string {
-  if (!output) return mark;
-  const { language, body } = unfence(output);
-  const result = truncateResult(body);
-  const fence = fenceFor(result);
-  return `${mark}\n\n${fence}${language}\n${result}\n${fence}`;
-}
-
-/** claude-agent-acp already wraps command output in a fence (renderer.js:206); its content is re-fenced here. */
-const OUTER_FENCE = /^(`{3,})([^\n`]*)\n([\s\S]*)\n\1$/;
-
-function unfence(text: string): { language: string; body: string } {
-  const match = OUTER_FENCE.exec(text.trim());
-  return match ? { language: String(match[2]), body: String(match[3]) } : { language: "", body: text };
-}
-
-/** CommonMark closes a fence only with at least as many backticks, so ours outgrows every run inside. */
-function fenceFor(text: string): string {
-  const runs = (text.match(/`+/g) ?? []).map((run) => run.length);
-  return "`".repeat(Math.max(3, ...runs.map((length) => length + 1)));
-}
-
-/** First lines of a tool result; "…" marks a cut inside them and the count names the lines after them. */
-export function truncateResult(text: string): string {
-  const lines = text.split("\n");
-  const head = lines.slice(0, MAX_RESULT_LINES).join("\n");
-  const shown = head.length > MAX_RESULT_CHARS ? `${head.slice(0, MAX_RESULT_CHARS)}…` : head;
-  const hidden = lines.length - MAX_RESULT_LINES;
-  return hidden > 0 ? `${shown}\n… (+${hidden} líneas)` : shown;
-}
-
-/** The plan while work remains; undefined once every entry is done. */
-function planWidget(entries: acp.PlanEntry[]): string[] | undefined {
-  if (entries.every((entry) => entry.status === "completed")) return undefined;
-  return ["Plan", ...entries.map((entry) => `${PLAN_MARKS[entry.status]} ${entry.content}`)];
-}
-
-function stopEvent(state: TurnState, reason: acp.StopReason): AssistantMessageEvent {
+function stopEvent(state: SegmentState, reason: acp.StopReason): AssistantMessageEvent {
   if (reason === "end_turn") return doneEvent(state);
-  if (reason === "cancelled") return failEvent(state, "aborted", "Turno cancelado.");
-  return failEvent(state, "error", `Claude Code terminó el turno: ${reason}`);
+  if (reason === "cancelled") return failEvent(state, "aborted", copy.turnCancelled);
+  return failEvent(state, "error", copy.turnEnded(reason));
 }
 
-function doneEvent(state: TurnState): AssistantMessageEvent {
+function doneEvent(state: SegmentState): AssistantMessageEvent {
   state.message.stopReason = "stop";
   return { type: "done", reason: "stop", message: state.message };
 }
 
-function failEvent(state: TurnState, reason: "aborted" | "error", message: string): AssistantMessageEvent {
+function failEvent(state: SegmentState, reason: "aborted" | "error", message: string): AssistantMessageEvent {
   closeBlock(state);
   state.message.stopReason = reason;
   state.message.errorMessage = message;
@@ -374,10 +568,10 @@ function toUsage(usage: acp.Usage | null | undefined, cost: number): Usage {
   };
 }
 
-/** The last user message as ACP content. Claude Code keeps the rest of the conversation. */
+/** The last user message as ACP content. The agent keeps the rest of the conversation. */
 function lastUserBlocks(context: TranscriptContext): acp.ContentBlock[] {
   const message = context.messages.findLast((m): m is UserMessage => m.role === "user");
-  if (!message) throw new Error("La conversación no tiene un mensaje de usuario para enviar.");
+  if (!message) throw new Error(copy.noUserMessage);
   if (typeof message.content === "string") return [{ type: "text", text: message.content }];
   return message.content.map((part) =>
     part.type === "text"
@@ -388,10 +582,9 @@ function lastUserBlocks(context: TranscriptContext): acp.ContentBlock[] {
 
 function requireImageSupport(conn: AcpConnection, blocks: acp.ContentBlock[]): void {
   if (conn.supportsImages || !blocks.some((block) => block.type === "image")) return;
-  throw new Error("El adaptador ACP no anuncia soporte de imágenes (promptCapabilities.image).");
+  throw new Error(copy.noImageSupport);
 }
 
-function describeError(error: unknown, version: string): string {
-  if (Object(error).code === AUTH_REQUIRED_CODE) return LOGIN_HINT;
-  return version ? `${errorText(error)} (Claude Code ${version})` : errorText(error);
+function describeError(error: unknown): string {
+  return Object(error).code === AUTH_REQUIRED_CODE ? LOGIN_HINT : errorText(error);
 }

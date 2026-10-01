@@ -8,6 +8,7 @@ import {
   loginState,
   warnIfLoggedOut,
 } from "../src/login.ts";
+import { copy } from "../src/messages.ts";
 
 const EXE = "/opt/claude";
 
@@ -137,7 +138,7 @@ describe("login", () => {
     const d = deps(status(true));
     await login(commandCtx("tui", ui), d);
     expect(d.restarts).toBe(1);
-    expect(notes).toEqual([{ message: expect.stringContaining("sesión iniciada"), type: "info" }]);
+    expect(notes).toEqual([{ message: copy.loggedIn, type: "info" }]);
   });
 
   it("keeps the adapter and reports the failure when there is still no login", async () => {

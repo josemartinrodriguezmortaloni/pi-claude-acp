@@ -19,9 +19,18 @@ Referencia: [specs/pi-claude-acp.md](specs/pi-claude-acp.md).
 - [x] Plan de Claude Code como widget en vivo arriba del editor, en lugar de texto en el transcript.
 - [x] Login de Claude Code (`login.ts`): aviso en `session_start` si no hay login y comando `/claude-login` que corre `claude auth login` en la terminal de Pi (C34-C37).
 
+- [x] UI sin la marca del agente y en el idioma del sistema (`messages.ts`, catálogos `en`/`es`).
+- [x] Turno segmentado con la herramienta espejo `agent_activity` (docs/adr/0001): ráfagas colapsables con Ctrl+O, estilo A+C 2.
+- [x] Diff de ediciones y contenido de archivos creados en la ráfaga.
+- [x] Razonamiento con renderer propio y animación (`thinking: adaptive + summarized`).
+- [x] Modos Manual, Ediciones automáticas y Plan (`alt+m`, `/mode`, footer), aprobación de plan con pedido de cambios.
+- [x] Subagentes como rama `TASK` y widgets de plan y subagentes con el mismo estilo.
+
 ## Pendiente
 
-- [ ] Rediseño del transcript (PRODUCT.md): una línea por herramienta dentro de citas, título final, contenido solo en comandos y fallos, progreso en la línea de trabajo.
+- [ ] Mensajes que el usuario escribe mientras un turno vivo sigue abierto (steer): hoy no llegan al agente.
+- [ ] Modo Auto después de un smoke test con el hook `ask`.
+- [ ] README y capturas con la UI nueva.
 
 - [ ] Plugin validador en TS contra el contrato de §5.5 (fuera de alcance, otra sesión).
 - [ ] Plugin de self-compact: toma `session_before_compact` y se quita el handler de `index.ts`.

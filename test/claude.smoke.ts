@@ -10,6 +10,7 @@ import { Catalog, toEffort } from "../src/catalog.ts";
 import { type AcpConnection, openConnection } from "../src/connection.ts";
 import { openProbe, SessionStore } from "../src/sessions.ts";
 import { type StreamDeps, streamPrompt } from "../src/stream.ts";
+import { TurnRegistry } from "../src/turn.ts";
 
 let conn: AcpConnection | undefined;
 const permissions: RequestPermissionRequest[] = [];
@@ -21,6 +22,7 @@ const store = new SessionStore({
   mcpServers: async () => [],
   contextBlock: async () => "<pi-context>smoke test</pi-context>",
   onConfig: (configOptions) => catalog.observe(configOptions),
+  mode: () => "default",
 });
 
 async function connection(): Promise<AcpConnection> {
@@ -40,7 +42,13 @@ const deps: StreamDeps = {
       : { outcome: { outcome: "cancelled" } };
   },
   elicit: async () => ({ action: "decline" }),
+  notify: () => {},
+  onModeChange: () => {},
+  // The smoke turn runs in one Pi message: it checks the ACP path, not the activity tool.
+  turns: new TurnRegistry(),
+  isAgentSession: () => false,
   showPlan: () => {},
+  showSubagents: () => {},
   onContextWindow: (modelId, size) => catalog.setContextWindow(modelId, size),
   noteCompaction: (session, update) => store.noteCompaction(session, update),
   log: () => {},

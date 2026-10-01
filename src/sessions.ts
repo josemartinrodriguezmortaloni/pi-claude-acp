@@ -18,22 +18,21 @@ import {
   type ProbeSession,
 } from "./catalog.ts";
 import type { AcpConnection } from "./connection.ts";
+import { copy } from "./messages.ts";
+import type { ModeId } from "./modes.ts";
 
 export const PROVIDER_ID = "claude-acp";
 export const SESSION_ENTRY = "claude-acp-session";
 /**
  * The adapter reads `defaultMode` from ~/.claude even with `settingSources: []`
- * (claude-agent-acp/dist/settings.js:79-88), so every session is forced back to this mode.
+ * (claude-agent-acp/dist/settings.js:79-88), so every session is set to the Pi session's mode.
+ * Internal calls always run in this one.
  */
 const DEFAULT_MODE: SessionModeId = "default";
 /** Sends every Claude Code tool call to session/request_permission. */
 const ASK_HOOK_COMMAND = `printf '%s' '${JSON.stringify({
   hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "ask" },
 })}'`;
-const RESUME_FAILED =
-  "No se pudo reanudar la sesión de Claude Code; se abrió una sesión nueva sin el historial previo.";
-const BRANCH_DIVERGED =
-  "La conversación de Pi cambió (rama, fork o edición); el contexto de Claude Code se reinició.";
 
 /**
  * Links a Pi session to its ACP session. Persisted with `pi.appendEntry`.
@@ -83,6 +82,8 @@ export interface SessionDeps {
   contextBlock(cwd: string): Promise<string>;
   /** Receives every config response, so the catalog learns models and effort levels. */
   onConfig(configOptions: SessionConfigOption[]): void;
+  /** The mode the user chose for a Pi session. */
+  mode(piSessionId: string): ModeId;
 }
 
 export interface SkillInfo {
@@ -102,6 +103,9 @@ export function sessionMeta(persist: boolean) {
     claudeCode: {
       options: {
         settingSources: [],
+        // Recent models stream empty thinking unless a summary is requested (acp-agent.js:7751);
+        // the `showThinkingSummaries` setting does not reach the SDK through the adapter.
+        thinking: { type: "adaptive", display: "summarized" },
         settings: {
           hooks: { PreToolUse: [{ matcher: "*", hooks: [{ type: "command", command: ASK_HOOK_COMMAND }] }] },
         },
@@ -140,7 +144,7 @@ export class SessionStore {
     const record = this.#records.get(piSessionId);
     if (!this.#diverged(piSessionId, record, branchHas)) return this.#reuse(conn, piSessionId, cwd, record);
     await this.#closeLive(piSessionId);
-    return this.#fresh(conn, piSessionId, cwd, [BRANCH_DIVERGED]);
+    return this.#fresh(conn, piSessionId, cwd, [copy.branchDiverged]);
   }
 
   #diverged(
@@ -275,7 +279,7 @@ export class SessionStore {
         _meta: sessionMeta(true),
       })
       .catch(() => undefined);
-    if (!response) return this.#fresh(conn, piSessionId, cwd, [RESUME_FAILED]);
+    if (!response) return this.#fresh(conn, piSessionId, cwd, [copy.resumeFailed]);
     const session = await this.#adopt(
       piSessionId,
       newSession(conn, acpSessionId, response.configOptions, true),
@@ -283,8 +287,14 @@ export class SessionStore {
     return { session, notices: [] };
   }
 
+  /** Applies a mode change to the live ACP session, if there is one. The next one opens in it anyway. */
+  async setMode(piSessionId: string, mode: ModeId): Promise<void> {
+    const live = this.#live.get(piSessionId);
+    await live?.conn.agent.setSessionMode({ sessionId: live.id, modeId: mode });
+  }
+
   async #adopt(piSessionId: string, session: AcpSession): Promise<AcpSession> {
-    await session.conn.agent.setSessionMode({ sessionId: session.id, modeId: DEFAULT_MODE });
+    await session.conn.agent.setSessionMode({ sessionId: session.id, modeId: this.deps.mode(piSessionId) });
     this.deps.onConfig(session.configOptions);
     this.#live.set(piSessionId, session);
     return session;
@@ -351,17 +361,14 @@ async function switchModel(session: AcpSession, modelId: string): Promise<void> 
   requireOffered(session, modelId);
   await setOption(session, MODEL_CONFIG_ID, modelId);
   if (configValue(session.configOptions, MODEL_CONFIG_ID) === modelId) return;
-  throw new Error(`Claude Code no aplicó el modelo ${modelId}.`);
+  throw new Error(copy.modelNotApplied(modelId));
 }
 
 function requireOffered(session: AcpSession, modelId: string): void {
   const offered = modelOptions(session.configOptions).map((option) => option.value);
   if (offered.includes(modelId)) return;
   const { claudeVersion, claudeExecutable } = session.conn;
-  throw new Error(
-    `Claude Code ${claudeVersion} (${claudeExecutable}) no ofrece el modelo ${modelId}. ` +
-      `Modelos disponibles: ${offered.join(", ")}.`,
-  );
+  throw new Error(copy.modelNotOffered(modelId, `${claudeExecutable} ${claudeVersion}`, offered));
 }
 
 export function skillsFromCommands(commands: SlashCommandInfo[]): SkillInfo[] {
@@ -414,7 +421,7 @@ function parseJson(file: string, text: string): { mcpServers?: Record<string, Pi
   try {
     return JSON.parse(text);
   } catch {
-    throw new Error(`${file} no es JSON válido.`);
+    throw new Error(copy.mcpInvalidJson(file));
   }
 }
 
@@ -432,7 +439,7 @@ function toAcpServer(name: string, server: PiMcpServer): McpServer {
 }
 
 function stdioServer(name: string, server: PiMcpServer): McpServer {
-  if (!server.command) throw new Error(`El servidor MCP "${name}" no tiene command ni url.`);
+  if (!server.command) throw new Error(copy.mcpServerWithoutCommand(name));
   return { name, command: server.command, args: server.args ?? [], env: pairs(server.env) };
 }
 
