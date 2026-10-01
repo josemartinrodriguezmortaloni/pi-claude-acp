@@ -59,7 +59,7 @@ In Pi, it reads as if you talk to the model directly: the transcript, the dialog
 - **Pi approves every tool call:** a `PreToolUse` hook sends each tool call to Pi validator plugins, the session mode and the Pi dialog
 - **Collapsible activity:** each burst of tools is one tree entry with the diff of every edit; `Ctrl+O` expands all of them
 - **Reasoning you can watch:** a live clock and the last line while the model reasons, then `Thought for N s`
-- **Modes and plans:** manual, auto-accept edits and plan mode on `alt+m`, and plan approval with Claude Code's three answers
+- **Modes and plans:** manual, auto-accept edits, plan and auto mode on `alt+m`, and plan approval with Claude Code's three answers
 - **Live widgets:** the plan and the running subagents show above the editor
 - **Sessions that resume:** the ACP session id and the mode live in the Pi session, so `--continue`, forks and tree navigation keep or reset the history on purpose
 - **Your language:** every text follows the system locale; English and Spanish ship today
@@ -205,7 +205,7 @@ ACP takes no input while a prompt runs. A message you write meanwhile shows in P
 
 ### Permissions
 
-Every session starts with an inline `PreToolUse` hook that answers `ask`. So Claude Code sends every tool call to `session/request_permission`, and the extension turns it into a vote.
+Every session starts with an inline `PreToolUse` hook that answers `ask`, except in auto mode. So Claude Code sends every tool call to `session/request_permission`, and the extension turns it into a vote.
 
 ```mermaid
 sequenceDiagram
@@ -243,6 +243,7 @@ sequenceDiagram
 | The session mode approves it ([Modes](#modes)) | Approve                                                          |
 | A validator votes `ask`, or none votes  | Pi dialog. Without a Pi UI, reject                                     |
 | `ExitPlanMode`                          | The plan dialog ([Plans](#plans)); validators are not asked            |
+| Auto mode, and the classifier approves  | Runs without reaching Pi                                               |
 | The turn is cancelled                   | `cancelled`                                                            |
 
 The dialog title names the tool and what it acts on, as in `Bash · rm -rf dist`. While the dialog is open, the tool's branch reads `? awaiting approval`. The dialog hides the "always allow" options: with the `ask` hook, Claude Code ignores the rule they write. Pi keeps one dialog at a time, so parallel tool calls wait in a queue instead of replacing each other.
@@ -269,15 +270,18 @@ export default function (pi: ExtensionAPI) {
 
 ### Modes
 
-The mode sets what Claude Code may do without a dialog. `alt+m` moves to the next mode, and `/mode [manual|edits|plan]` picks one. The footer shows the mode while a `claude-acp` model is active.
+The mode sets what Claude Code may do without a dialog. `alt+m` moves to the next mode, and `/mode [manual|edits|plan|auto]` picks one. The footer shows the mode while a `claude-acp` model is active.
 
 | Mode              | Footer                  | Approves without a dialog                                              |
 | ----------------- | ----------------------- | ---------------------------------------------------------------------- |
 | Manual            | `⏸ manual mode`         | Only Claude Code's internal `ToolSearch`                               |
 | Auto-accept edits | `⏵⏵ auto-accept edits`  | `Edit`, `MultiEdit`, `Write` and `NotebookEdit` inside the working directory |
 | Plan              | `◇ plan mode`           | The plan file Claude Code writes in `~/.claude/plans`                  |
+| Auto              | `⏵⏵⏵ auto mode`         | Whatever Claude Code's classifier judges safe                          |
 
-Validators vote before the mode: a `deny` still wins. A `claude-acp-mode` entry saves each change, so a resumed session keeps its mode and a new one starts in Manual. When Claude Code changes its own mode, for example when it enters plan mode, the footer follows. Auto and bypass are not offered: Auto needs a test against the `ask` hook, and bypass skips the validators.
+Validators vote before the mode: a `deny` still wins. A `claude-acp-mode` entry saves each change, so a resumed session keeps its mode and a new one starts in Manual. When Claude Code changes its own mode, for example when it enters plan mode, the footer follows.
+
+Auto works differently. The `ask` hook steps aside when `permission_mode` is `auto`, and Claude Code's classifier decides. Only the tool calls it escalates reach Pi, so validators and dialogs never see the rest: in a test it ran `git push --force` and `rm -rf ~/…` without asking. The footer shows Auto in red for that reason. A model without Auto falls back to auto-accept edits, and the footer follows. Bypass is not offered: it skips everything.
 
 ### Plans
 

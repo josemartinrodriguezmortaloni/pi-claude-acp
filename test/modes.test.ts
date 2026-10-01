@@ -22,10 +22,11 @@ const modeEntry = (mode: string, id: string): SessionEntry =>
   }) as SessionEntry;
 
 describe("modes", () => {
-  it("cycles manual → auto-accept edits → plan → manual", () => {
-    expect([nextMode("default"), nextMode("acceptEdits"), nextMode("plan")]).toEqual([
+  it("cycles manual → auto-accept edits → plan → auto → manual", () => {
+    expect([nextMode("default"), nextMode("acceptEdits"), nextMode("plan"), nextMode("auto")]).toEqual([
       "acceptEdits",
       "plan",
+      "auto",
       "default",
     ]);
   });
@@ -57,6 +58,7 @@ describe("autoApproves", () => {
     expect(autoApproves("acceptEdits", bash, "/work")).toBe(false);
     expect(autoApproves("default", edit("/work/a.ts"), "/work")).toBe(false);
     expect(autoApproves("plan", edit("/work/a.ts"), "/work")).toBe(false);
+    expect(autoApproves("auto", edit("/work/a.ts"), "/work")).toBe(false);
   });
 
   it("checks every location the edit names", () => {

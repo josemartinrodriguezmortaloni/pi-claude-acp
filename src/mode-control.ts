@@ -11,11 +11,14 @@ const MODE_NAMES = new Map<string, ModeId>([
   ["manual", "default"],
   ["edits", "acceptEdits"],
   ["plan", "plan"],
+  ["auto", "auto"],
 ]);
-const MODE_COLORS: Record<ModeId, "muted" | "warning" | "accent"> = {
+/** Auto is red: the classifier, not Pi, approves most tool calls. */
+const MODE_COLORS: Record<ModeId, "muted" | "warning" | "accent" | "error"> = {
   default: "muted",
   acceptEdits: "warning",
   plan: "accent",
+  auto: "error",
 };
 
 type Context = Pick<ExtensionContext, "sessionManager" | "ui" | "model">;
@@ -55,7 +58,7 @@ export class ModeControl {
     return this.choose(ctx, nextMode(this.get(ctx.sessionManager.getSessionId())));
   }
 
-  /** `/mode [manual|edits|plan]`; without a name, a dialog lists the modes. */
+  /** `/mode [manual|edits|plan|auto]`; without a name, a dialog lists the modes. */
   command(args: string, ctx: Context): Promise<void> {
     const name = args.trim();
     return name ? this.#chooseNamed(name, ctx) : this.#chooseFromDialog(ctx);

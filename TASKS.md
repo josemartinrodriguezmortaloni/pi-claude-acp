@@ -27,10 +27,11 @@ Referencia: [specs/pi-claude-acp.md](specs/pi-claude-acp.md).
 - [x] Subagentes como rama `TASK` y widgets de plan y subagentes con el mismo estilo.
 - [x] Mensajes escritos durante un turno vivo (steer): esperan al fin del turno ACP y abren el siguiente en el mismo mensaje de Pi.
 - [x] README y capturas con la UI nueva.
+- [x] Modo Auto: el hook `ask` se corre cuando `permission_mode` es `auto` y decide el clasificador de Claude Code (probado en Pi real).
 
 ## Pendiente
 
-- [ ] Modo Auto después de un smoke test con el hook `ask`.
 
 - [ ] Plugin validador en TS contra el contrato de §5.5 (fuera de alcance, otra sesión).
+- [ ] Plugin aparte de markdown: un `registerMarkdownTransformer` que reintenta los diagramas Mermaid que no entran (LR→TD, etiquetas partidas, `sourceBox`) y permite borrar la regla de ancho de `~/.pi/agent/AGENTS.md:70`.
 - [ ] Plugin de self-compact: toma `session_before_compact` y se quita el handler de `index.ts`.

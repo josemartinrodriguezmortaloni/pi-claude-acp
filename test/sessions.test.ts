@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +15,7 @@ import {
   openProbe,
   SESSION_ENTRY,
   SessionStore,
+  sessionMeta,
   shouldCancelCompaction,
   skillsFromCommands,
 } from "../src/sessions.ts";
@@ -439,5 +441,32 @@ describe("branchContains", () => {
     expect(has(null)).toBe(true);
     expect(has("b")).toBe(true);
     expect(has("z")).toBe(false);
+  });
+});
+
+describe("permission hook", () => {
+  const hookCommand = () =>
+    sessionMeta(true).claudeCode.options.settings.hooks.PreToolUse[0]?.hooks[0]?.command ?? "";
+  const runHook = (input: object) =>
+    new Promise<string>((resolve, reject) => {
+      const child = execFile("sh", ["-c", hookCommand()], (error, stdout) =>
+        error ? reject(error) : resolve(stdout),
+      );
+      child.stdin?.end(JSON.stringify(input));
+    });
+
+  it("sends every tool call to the permission request outside auto mode", async () => {
+    for (const permission_mode of ["default", "acceptEdits", "plan"]) {
+      const out = JSON.parse(
+        await runHook({ hook_event_name: "PreToolUse", permission_mode, tool_name: "Bash" }),
+      );
+      expect(out.hookSpecificOutput.permissionDecision).toBe("ask");
+    }
+  });
+
+  it("lets Claude Code's classifier decide in auto mode", async () => {
+    await expect(
+      runHook({ hook_event_name: "PreToolUse", permission_mode: "auto", tool_name: "Bash" }),
+    ).resolves.toBe("");
   });
 });

@@ -21,7 +21,7 @@ La representación de una ráfaga en el transcript: una línea de resumen, una r
 _Avoid_: comentario, tool block, tarjeta
 
 **Modo**:
-La política con la que el agente pide permiso durante la sesión. Los valores son Manual, Ediciones automáticas y Plan.
+La política con la que el agente pide permiso durante la sesión. Los valores son Manual, Ediciones automáticas, Plan y Auto.
 _Avoid_: permission mode, perfil, Aceptar ediciones
 
 **Subagente**:

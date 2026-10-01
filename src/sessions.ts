@@ -29,8 +29,12 @@ export const SESSION_ENTRY = "claude-acp-session";
  * Internal calls always run in this one.
  */
 const DEFAULT_MODE: SessionModeId = "default";
-/** Sends every Claude Code tool call to session/request_permission. */
-const ASK_HOOK_COMMAND = `printf '%s' '${JSON.stringify({
+/**
+ * Sends every tool call to session/request_permission, except in auto mode: there Claude Code's
+ * classifier decides, and only what it escalates reaches Pi. The hook reads its JSON input on stdin;
+ * grep keeps it fast, since it runs before every tool call.
+ */
+const ASK_HOOK_COMMAND = `grep -Eq '"permission_mode" *: *"auto"' || printf '%s' '${JSON.stringify({
   hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "ask" },
 })}'`;
 

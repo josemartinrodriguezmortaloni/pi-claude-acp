@@ -61,6 +61,13 @@ describe("ModeControl", () => {
     expect(asked.control.get("pi-1")).toBe("plan");
   });
 
+  it("accepts auto in /mode and paints it as a risk", async () => {
+    const { control, ctx, statuses } = setup();
+    await control.command("auto", ctx);
+    expect(control.get("pi-1")).toBe("auto");
+    expect(statuses.at(-1)).toBe(`${copy.modeLabel.auto} (alt+m)`);
+  });
+
   it("reports an unknown mode name and keeps the mode", async () => {
     const { control, ctx, notes, applied } = setup();
     await control.command("yolo", ctx);

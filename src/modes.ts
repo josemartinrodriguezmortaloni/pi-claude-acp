@@ -5,9 +5,10 @@ import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 
 /**
  * The modes the extension offers, in `alt+m` order. They are claude-agent-acp mode ids
- * (session-mode.js:204-248). Auto waits for a smoke test; bypass skips the validators.
+ * (session-mode.js:204-248). Bypass is not offered: it skips the validators. In auto, Claude Code's
+ * classifier approves what it judges safe, so validators only see what it escalates.
  */
-export const MODES = ["default", "acceptEdits", "plan"] as const;
+export const MODES = ["default", "acceptEdits", "plan", "auto"] as const;
 export type ModeId = (typeof MODES)[number];
 
 /** Custom entry that records each mode change of a Pi session. */
@@ -25,6 +26,8 @@ const MODE_RULES: Record<ModeId, (toolCall: ToolCallUpdate, cwd: string) => bool
   default: () => false,
   acceptEdits: (toolCall, cwd) => isEdit(toolCall) && editsInside(toolCall, cwd),
   plan: (toolCall) => isEdit(toolCall) && editsInside(toolCall, PLANS_DIR),
+  // What reaches Pi in auto is what the classifier escalated: the user decides.
+  auto: () => false,
 };
 
 export function isModeId(value: unknown): value is ModeId {
