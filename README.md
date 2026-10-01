@@ -56,7 +56,7 @@ In Pi, it reads as if you talk to the model directly: the transcript, the dialog
 ## Highlights
 
 - **Your binary, your login:** only the `claude` binary talks to Anthropic; the extension never reads, stores or logs tokens
-- **Pi approves every tool call:** a `PreToolUse` hook sends each tool call to Pi validator plugins, the session mode and the Pi dialog
+- **Pi approves the tool calls:** a `PreToolUse` hook sends each tool call to Pi validator plugins, the session mode and the Pi dialog; in auto mode, Claude Code's classifier approves first
 - **Collapsible activity:** each burst of tools is one tree entry with the diff of every edit; `Ctrl+O` expands all of them
 - **Reasoning you can watch:** a live clock and the last line while the model reasons, then `Thought for N s`
 - **Modes and plans:** manual, auto-accept edits, plan and auto mode on `alt+m`, and plan approval with Claude Code's three answers
@@ -217,6 +217,7 @@ sequenceDiagram
     participant UI as Pi dialog
 
     CC->>ACP: PreToolUse hook answers "ask"
+    Note over CC,ACP: in auto mode, only what the classifier escalates
     ACP->>Ext: session/request_permission
     Ext->>Val: emit "claude-acp:tool-request"
     Val-->>Ext: vote(allow | deny | ask)
@@ -274,7 +275,7 @@ The mode sets what Claude Code may do without a dialog. `alt+m` moves to the nex
 
 | Mode              | Footer                  | Approves without a dialog                                              |
 | ----------------- | ----------------------- | ---------------------------------------------------------------------- |
-| Manual            | `⏸ manual mode`         | Only Claude Code's internal `ToolSearch`                               |
+| Manual            | `⏸ manual mode`         | Only Claude Code's internal `ToolSearch`, which every mode approves    |
 | Auto-accept edits | `⏵⏵ auto-accept edits`  | `Edit`, `MultiEdit`, `Write` and `NotebookEdit` inside the working directory |
 | Plan              | `◇ plan mode`           | The plan file Claude Code writes in `~/.claude/plans`                  |
 | Auto              | `⏵⏵⏵ auto mode`         | Whatever Claude Code's classifier judges safe                          |
@@ -506,6 +507,7 @@ classDiagram
 - Claude Code receives only the last user message. Editing an earlier message in Pi, or moving in the tree, starts a new Claude Code session without the old history.
 - Pi's system prompt is not sent. Claude Code keeps its own; Pi context arrives as the `<pi-context>` block.
 - Pi runs only `agent_activity`, which waits for Claude Code. Pi tool hooks see `agent_activity`, not Claude Code's tools; validators see those through `claude-acp:tool-request`.
+- In auto mode, validators see only what Claude Code's classifier escalates. The rest runs without a vote.
 - Each burst and each run of reasoning adds a Pi message and a tool result to the session.
 - A message you write during a turn reaches Claude Code when the turn ends, not at once.
 - The adapter version is pinned. A new adapter needs a new release of this extension.
