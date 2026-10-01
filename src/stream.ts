@@ -65,7 +65,9 @@ export interface StreamDeps {
 
 interface Segment {
   state: SegmentState;
+  /** Changes when the turn ends and the user's waiting messages open the next one. */
   turn: LiveTurn;
+  options: SimpleStreamOptions;
   deps: StreamDeps;
   push: Push;
 }
@@ -119,8 +121,33 @@ async function startSegment(
 ): Promise<AssistantMessageEvent> {
   const live = deps.turns.live(options.sessionId);
   if (isAborted(options.signal)) return abandon(state, live, deps);
-  const turn = live ?? (await openTurn(state, context, options, deps));
-  return runSegment({ state, turn, deps, push }, options.signal);
+  const turn = await turnFor(live, state, context, options, deps);
+  return runSegment({ state, turn, options, deps, push }, options.signal);
+}
+
+/**
+ * A call that continues a live turn may carry messages the user wrote meanwhile: Pi adds them after
+ * the activity tool result (pi-agent-core/dist/agent-loop.js:186). They wait for the turn to end.
+ */
+async function turnFor(
+  live: LiveTurn | undefined,
+  state: SegmentState,
+  context: TranscriptContext,
+  options: SimpleStreamOptions,
+  deps: StreamDeps,
+): Promise<LiveTurn> {
+  if (!live) return openTurn(state, lastUserBlocks(context), options, deps);
+  live.addSteers(steersOf(context));
+  return live;
+}
+
+/** The user messages after the last tool result. */
+function steersOf(context: TranscriptContext): acp.ContentBlock[][] {
+  const lastResult = context.messages.findLastIndex((message) => message.role === "toolResult");
+  return context.messages
+    .slice(lastResult + 1)
+    .filter((message): message is UserMessage => message.role === "user")
+    .map(userBlocks);
 }
 
 function isAborted(signal: AbortSignal | undefined): boolean {
@@ -136,11 +163,10 @@ function abandon(state: SegmentState, live: LiveTurn | undefined, deps: StreamDe
 /** Starts the ACP prompt in the background; its events reach the segment through the turn queue. */
 async function openTurn(
   state: SegmentState,
-  context: TranscriptContext,
+  blocks: acp.ContentBlock[],
   options: SimpleStreamOptions,
   deps: StreamDeps,
 ): Promise<LiveTurn> {
-  const blocks = lastUserBlocks(context);
   const conn = await deps.connect();
   requireImageSupport(conn, blocks);
   const modelId = state.message.model;
@@ -280,20 +306,19 @@ async function runSegment(segment: Segment, signal: AbortSignal | undefined): Pr
 
 async function readSegment(segment: Segment): Promise<AssistantMessageEvent> {
   for (;;) {
-    const last = segmentStep(await segment.turn.events.next(), segment);
+    const last = await segmentStep(await segment.turn.events.next(), segment);
     if (last) return last;
   }
 }
 
-function segmentStep(event: TurnEvent, segment: Segment): AssistantMessageEvent | undefined {
+type StepResult = AssistantMessageEvent | undefined | Promise<AssistantMessageEvent | undefined>;
+
+function segmentStep(event: TurnEvent, segment: Segment): StepResult {
   return STEPS[event.kind](event as never, segment);
 }
 
 const STEPS: {
-  [K in TurnEvent["kind"]]: (
-    event: Extract<TurnEvent, { kind: K }>,
-    segment: Segment,
-  ) => AssistantMessageEvent | undefined;
+  [K in TurnEvent["kind"]]: (event: Extract<TurnEvent, { kind: K }>, segment: Segment) => StepResult;
 } = {
   update: (event, segment) => segmentUpdate(event.update, segment),
   end: (event, segment) => endTurn(event, segment),
@@ -433,12 +458,36 @@ function chunkText(update: acp.SessionUpdate): string {
   return content?.type === "text" ? content.text : "";
 }
 
-function endTurn(event: Extract<TurnEvent, { kind: "end" }>, segment: Segment): AssistantMessageEvent {
+/**
+ * Ends the Pi message, unless the user wrote during the turn: then those messages open the next ACP
+ * turn and this message goes on with its answer.
+ */
+async function endTurn(
+  event: Extract<TurnEvent, { kind: "end" }>,
+  segment: Segment,
+): Promise<AssistantMessageEvent | undefined> {
   const { state, turn, deps, push } = segment;
   push(closeBlock(state));
   deps.turns.close(turn);
-  state.message.usage = toUsage(event.response.usage, event.cost);
-  return stopEvent(state, stopReasonOf(event.response.stopReason, turn));
+  state.message.usage = addUsage(state.message.usage, toUsage(event.response.usage, event.cost));
+  const reason = stopReasonOf(event.response.stopReason, turn);
+  const steers = reason === "end_turn" ? turn.takeSteers() : [];
+  if (steers.length === 0) return stopEvent(state, reason);
+  segment.turn = await openTurn(state, steers, segment.options, deps);
+  return undefined;
+}
+
+/** The usage of a message that spans several ACP turns. */
+function addUsage(first: Usage, second: Usage): Usage {
+  return {
+    input: first.input + second.input,
+    output: first.output + second.output,
+    cacheRead: first.cacheRead + second.cacheRead,
+    cacheWrite: first.cacheWrite + second.cacheWrite,
+    reasoning: (first.reasoning ?? 0) + (second.reasoning ?? 0),
+    totalTokens: first.totalTokens + second.totalTokens,
+    cost: { ...first.cost, total: first.cost.total + second.cost.total },
+  };
 }
 
 /**
@@ -572,6 +621,10 @@ function toUsage(usage: acp.Usage | null | undefined, cost: number): Usage {
 function lastUserBlocks(context: TranscriptContext): acp.ContentBlock[] {
   const message = context.messages.findLast((m): m is UserMessage => m.role === "user");
   if (!message) throw new Error(copy.noUserMessage);
+  return userBlocks(message);
+}
+
+function userBlocks(message: UserMessage): acp.ContentBlock[] {
   if (typeof message.content === "string") return [{ type: "text", text: message.content }];
   return message.content.map((part) =>
     part.type === "text"

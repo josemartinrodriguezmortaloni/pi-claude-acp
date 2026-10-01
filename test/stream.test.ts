@@ -88,8 +88,11 @@ function harness(conn = new FakeConnection(), beforeTask = () => {}) {
       events.push(event);
     return events;
   };
-  const loop = (messages: Message[], options: SimpleStreamOptions = { sessionId: "pi-1" }) =>
-    agentLoop(deps, messages, options);
+  const loop = (
+    messages: Message[],
+    options: SimpleStreamOptions = { sessionId: "pi-1" },
+    steer: Message[] = [],
+  ) => agentLoop(deps, messages, options, steer);
   return {
     conn,
     store,
@@ -127,7 +130,9 @@ async function agentLoop(
   deps: StreamDeps,
   messages: Message[],
   options: SimpleStreamOptions,
+  steer: Message[],
 ): Promise<LoopRun> {
+  const waiting = [...steer];
   const tool = activityTool(deps.turns);
   const context = [...messages];
   const run: LoopRun = { segments: [], bursts: [], reasonings: [], partials: [], summaries: [] };
@@ -161,6 +166,8 @@ async function agentLoop(
       isError: false,
       timestamp: 0,
     });
+    // Pi adds what the user wrote meanwhile after the tool results (agent-loop.js:186).
+    context.push(...waiting.splice(0));
   }
 }
 
@@ -442,6 +449,50 @@ describe("streamPrompt: content", () => {
     });
     await h.loop([user("buscá")]);
     expect(h.subagentTools.at(-1)).toMatchObject([{ id: "task", name: "Task", target: "buscar tests" }]);
+  });
+
+  it("sends what the user wrote during a burst as the next prompt when the turn ends, in the same message", async () => {
+    const h = harness();
+    let prompts = 0;
+    h.conn.onPrompt = async (params, fake) => {
+      prompts++;
+      if (prompts === 1) {
+        fake.emit(params.sessionId, toolCall("t1", "Bash", "npm test", { kind: "execute" }));
+        fake.emit(params.sessionId, text("Corrí los tests."));
+        return { stopReason: "end_turn", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 } };
+      }
+      fake.emit(params.sessionId, text("Paso a pnpm."));
+      return { stopReason: "end_turn", usage: { inputTokens: 20, outputTokens: 7, totalTokens: 27 } };
+    };
+    const run = await h.loop([user("probá")], { sessionId: "pi-1" }, [user("usá pnpm")]);
+    expect(h.conn.callsOf("prompt").map((call) => call.prompt)).toEqual([
+      [
+        { type: "text", text: "<pi-context/>" },
+        { type: "text", text: "probá" },
+      ],
+      [{ type: "text", text: "usá pnpm" }],
+    ]);
+    const last = run.segments.at(-1)?.at(-1);
+    expect(finalText(run.segments.at(-1) ?? [])).toBe("Corrí los tests.Paso a pnpm.");
+    expect(last).toMatchObject({
+      type: "done",
+      reason: "stop",
+      message: { usage: { input: 30, output: 12, totalTokens: 42 } },
+    });
+  });
+
+  it("drops what the user wrote when they cancel the turn", async () => {
+    const h = harness();
+    const controller = new AbortController();
+    h.conn.onPrompt = async (params, fake) => {
+      fake.emit(params.sessionId, toolCall("t1", "Bash", "sleep 60", { kind: "execute" }));
+      const cancelled = fake.untilCancel();
+      setTimeout(() => controller.abort(), 0);
+      await cancelled;
+      return { stopReason: "cancelled" };
+    };
+    await h.loop([user("esperá")], { sessionId: "pi-1", signal: controller.signal }, [user("y además…")]);
+    expect(h.conn.callsOf("prompt")).toHaveLength(1);
   });
 
   it("C10: never splits a Pi internal call: its tool calls stay out of the message", async () => {

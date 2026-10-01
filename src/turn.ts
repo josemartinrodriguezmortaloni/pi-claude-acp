@@ -52,6 +52,8 @@ export class LiveTurn {
   #cancelPrompt: () => void = () => {};
   #burst: Burst | undefined;
   #reasoning: Reasoning | undefined;
+  /** Messages the user wrote while this turn ran (Pi's steering). Each is a list of content blocks. */
+  readonly #steers: acp.ContentBlock[][] = [];
 
   /**
    * @param key Pi session id that continues this turn, or undefined for internal calls.
@@ -82,6 +84,16 @@ export class LiveTurn {
     if (this.signal.aborted) return;
     this.#controller.abort();
     this.#cancelPrompt();
+  }
+
+  /** ACP takes no input while a prompt runs, so these wait for the turn to end. */
+  addSteers(messages: acp.ContentBlock[][]): void {
+    this.#steers.push(...messages);
+  }
+
+  /** Every waiting message, in the order the user wrote them, as one prompt. */
+  takeSteers(): acp.ContentBlock[] {
+    return this.#steers.splice(0).flat();
   }
 
   startBurst(firstToolCallId: string): Burst {
