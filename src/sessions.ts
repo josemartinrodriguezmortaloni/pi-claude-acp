@@ -82,7 +82,8 @@ export interface OpenTurn extends OpenedSession {
 }
 
 export interface SessionDeps {
-  mcpServers(): Promise<McpServer[]>;
+  /** The MCP servers of a new session. A Pi session also gets its harness server; internal calls do not. */
+  mcpServers(piSessionId?: string): Promise<McpServer[]>;
   contextBlock(cwd: string): Promise<string>;
   /** Receives every config response, so the catalog learns models and effort levels. */
   onConfig(configOptions: SessionConfigOption[]): void;
@@ -258,7 +259,7 @@ export class SessionStore {
   ): Promise<OpenedSession> {
     const response = await conn.agent.newSession({
       cwd,
-      mcpServers: await this.deps.mcpServers(),
+      mcpServers: await this.deps.mcpServers(piSessionId),
       _meta: sessionMeta(true),
     });
     const session = await this.#adopt(
@@ -279,7 +280,7 @@ export class SessionStore {
       .resumeSession({
         sessionId: acpSessionId,
         cwd,
-        mcpServers: await this.deps.mcpServers(),
+        mcpServers: await this.deps.mcpServers(piSessionId),
         _meta: sessionMeta(true),
       })
       .catch(() => undefined);

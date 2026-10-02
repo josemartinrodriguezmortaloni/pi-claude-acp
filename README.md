@@ -57,6 +57,7 @@ In Pi, it reads as if you talk to the model directly: the transcript, the dialog
 
 - **Your binary, your login:** only the `claude` binary talks to Anthropic; the extension never reads, stores or logs tokens
 - **Pi approves the tool calls:** a `PreToolUse` hook sends each tool call to Pi validator plugins, the session mode and the Pi dialog; in auto mode, Claude Code's classifier approves first
+- **Pi's tools for the agent:** tools of Pi extensions, such as `eval` and `codemode`, reach Claude Code through a loopback MCP server, and Pi runs them as its own tool calls
 - **Collapsible activity:** each burst of tools is one tree entry with the diff of every edit; `Ctrl+O` expands all of them
 - **Reasoning you can watch:** a live clock and the last line while the model reasons, then `Thought for N s`
 - **Modes and plans:** manual, auto-accept edits, plan and auto mode on `alt+m`, and plan approval with Claude Code's three answers
@@ -306,6 +307,12 @@ The extension announces the ACP `elicitation.form` capability. When Claude Code 
 
 Two widgets above the editor show work in progress: Claude Code's plan, and the subagents of the turn. Both use the same rows: `✓` struck through when done, `●` in progress, `○` pending. Each shows 4 rows; `Ctrl+O` shows all of them. A widget closes when everything in it is done.
 
+### Harness tools
+
+Claude Code has its own Read, Edit, Write, Bash, Grep and Glob, but Pi extensions register tools it lacks, such as `eval` and `codemode`. The extension serves these harness tools on an MCP server at `127.0.0.1`, with one bearer token per Pi session, and passes it to each Claude Code session as `pi`. Claude Code sees every active Pi tool except Pi's `read`, `edit`, `write`, `bash`, `grep`, `find` and `ls`.
+
+When Claude Code calls `mcp__pi__eval`, the call goes through the mode like any other tool. Then the provider ends the Pi message with a real `eval` tool call. Pi runs it with its own renderer and hooks, and the result goes back to Claude Code when Pi reports `tool_execution_end`. Tools of the burst that still run continue in a new activity entry after the harness tool. See [ADR 0002](docs/adr/0002-herramientas-del-harness-por-ida-y-vuelta.md).
+
 ### Transcript
 
 Text stays text. Everything else Claude Code does is an entry of `agent_activity`, and `Ctrl+O` expands or collapses every entry at once.
@@ -391,6 +398,8 @@ Each module owns one reason to change. `index.ts` only registers the provider an
 | `burst.ts`       | Tool entries from ACP reports, bursts, file changes                   | The adapter's tool reports change    |
 | `reasoning.ts`   | One run of reasoning                                                  | The reasoning display changes        |
 | `activity.ts`    | The `agent_activity` tool                                             | Pi's tool contract changes           |
+| `harness.ts`     | Which Pi tools the agent gets, and which reports are theirs           | The set of native tools changes      |
+| `harness-server.ts` | The loopback MCP server of the harness tools                       | The MCP transport changes            |
 | `activity-view.ts` | The lines of an entry: tree, chips, diffs, reasoning                | The transcript design changes        |
 | `progress-widget.ts` | The plan and subagent widgets                                     | The widget design changes            |
 | `modes.ts`       | The modes and what each approves                                      | A mode's policy changes              |
@@ -506,7 +515,8 @@ classDiagram
 
 - Claude Code receives only the last user message. Editing an earlier message in Pi, or moving in the tree, starts a new Claude Code session without the old history.
 - Pi's system prompt is not sent. Claude Code keeps its own; Pi context arrives as the `<pi-context>` block.
-- Pi runs only `agent_activity`, which waits for Claude Code. Pi tool hooks see `agent_activity`, not Claude Code's tools; validators see those through `claude-acp:tool-request`.
+- Pi runs only `agent_activity`, which waits for Claude Code, and the harness tools. Pi tool hooks see those, not Claude Code's own tools; validators see those through `claude-acp:tool-request`.
+- A harness tool call ends the burst in progress. Claude Code loads MCP tools on demand, so it usually calls `ToolSearch` before the first harness tool.
 - In auto mode, validators see only what Claude Code's classifier escalates. The rest runs without a vote.
 - Each burst and each run of reasoning adds a Pi message and a tool result to the session.
 - A message you write during a turn reaches Claude Code when the turn ends, not at once.

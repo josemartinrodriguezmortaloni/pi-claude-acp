@@ -9,13 +9,17 @@ import { RequestError } from "@agentclientprotocol/sdk";
 import {
   type Api,
   type AssistantMessageEvent,
+  type ImageContent,
   type Message,
   type Model,
   normalizeContext,
   type SimpleStreamOptions,
+  type TextContent,
+  type ToolCall,
+  Type,
 } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
-import { activityTool } from "../src/activity.ts";
+import { ACTIVITY_TOOL, activityTool } from "../src/activity.ts";
 import type { BurstDetails, ToolEntry } from "../src/burst.ts";
 import { copy } from "../src/messages.ts";
 import type { ReasoningDetails } from "../src/reasoning.ts";
@@ -55,6 +59,7 @@ function harness(conn = new FakeConnection(), beforeTask = () => {}) {
   const subagentTools: ToolEntry[][] = [];
   const elicitations: { message: string; aborted: boolean }[] = [];
   const notified: string[] = [];
+  const offered: [string, string[]][] = [];
   const deps: StreamDeps = {
     connect: async () => conn,
     withTurn: (request, task) =>
@@ -76,6 +81,7 @@ function harness(conn = new FakeConnection(), beforeTask = () => {}) {
     onModeChange: () => {},
     showPlan: (entries) => plans.push(entries),
     showSubagents: (tools) => subagentTools.push(tools),
+    offerTools: (sessionId, tools) => offered.push([sessionId, tools.map((tool) => tool.name)]),
     onContextWindow: (modelId, size) => windows.push([modelId, size]),
     noteCompaction: (session, update) => store.noteCompaction(session, update),
     turns: new TurnRegistry(),
@@ -92,7 +98,8 @@ function harness(conn = new FakeConnection(), beforeTask = () => {}) {
     messages: Message[],
     options: SimpleStreamOptions = { sessionId: "pi-1" },
     steer: Message[] = [],
-  ) => agentLoop(deps, messages, options, steer);
+    runTool: RunTool = echoTool,
+  ) => agentLoop(deps, messages, options, steer, runTool);
   return {
     conn,
     store,
@@ -103,6 +110,7 @@ function harness(conn = new FakeConnection(), beforeTask = () => {}) {
     subagentTools,
     elicitations,
     notified,
+    offered,
     run,
     loop,
     deps,
@@ -120,7 +128,16 @@ interface LoopRun {
   partials: BurstDetails[];
   /** The model-facing text of each activity tool result. */
   summaries: string[];
+  /** Each harness tool call Pi ran, in order. */
+  harness: { name: string; arguments: Record<string, unknown> }[];
 }
+
+type RunTool = (call: ToolCall) => Promise<{ content: (TextContent | ImageContent)[] }>;
+
+/** Pi's run of a harness tool in these tests: it echoes the call. */
+const echoTool: RunTool = async (call) => ({
+  content: [{ type: "text", text: `${call.name}: ${JSON.stringify(call.arguments)}` }],
+});
 
 /**
  * Pi's agent loop over claude-acp (pi-agent-core/dist/agent-loop.js:130-175): an assistant message
@@ -131,11 +148,12 @@ async function agentLoop(
   messages: Message[],
   options: SimpleStreamOptions,
   steer: Message[],
+  runTool: RunTool,
 ): Promise<LoopRun> {
   const waiting = [...steer];
   const tool = activityTool(deps.turns);
   const context = [...messages];
-  const run: LoopRun = { segments: [], bursts: [], reasonings: [], partials: [], summaries: [] };
+  const run: LoopRun = { segments: [], bursts: [], reasonings: [], partials: [], summaries: [], harness: [] };
   for (;;) {
     const events: AssistantMessageEvent[] = [];
     for await (const event of streamPrompt(MODEL, normalizeContext({ messages: context }), options, deps))
@@ -143,10 +161,28 @@ async function agentLoop(
     run.segments.push(events);
     const last = events.at(-1);
     if (last?.type !== "done" || last.reason !== "toolUse") return run;
-    const call = last.message.content.find((block) => block.type === "toolCall");
-    if (!call) throw new Error("toolUse without a tool call");
+    const calls = last.message.content.filter((block) => block.type === "toolCall");
+    if (calls.length === 0) throw new Error("toolUse without a tool call");
+    context.push(last.message);
+    // Pi runs the calls one by one: the activity tool is sequential (agent-loop.js:368).
+    for (const call of calls) {
+      const content = call.name === ACTIVITY_TOOL ? await runActivity(call.id) : await runHarnessTool(call);
+      context.push({
+        role: "toolResult",
+        toolCallId: call.id,
+        toolName: call.name,
+        content,
+        isError: false,
+        timestamp: 0,
+      });
+    }
+    // Pi adds what the user wrote meanwhile after the tool results (agent-loop.js:186).
+    context.push(...waiting.splice(0));
+  }
+
+  async function runActivity(id: string) {
     const result = await tool.execute(
-      call.id,
+      id,
       {},
       options.signal,
       (partial) => {
@@ -157,17 +193,15 @@ async function agentLoop(
     if ("tools" in result.details) run.bursts.push(result.details);
     else run.reasonings.push(result.details);
     run.summaries.push(result.content.map((block) => (block.type === "text" ? block.text : "")).join(""));
-    context.push(last.message, {
-      role: "toolResult",
-      toolCallId: call.id,
-      toolName: call.name,
-      content: result.content,
-      details: result.details as never,
-      isError: false,
-      timestamp: 0,
-    });
-    // Pi adds what the user wrote meanwhile after the tool results (agent-loop.js:186).
-    context.push(...waiting.splice(0));
+    return result.content;
+  }
+
+  /** Pi runs the real tool, then the extension hears tool_execution_end (src/index.ts). */
+  async function runHarnessTool(call: ToolCall) {
+    run.harness.push({ name: call.name, arguments: call.arguments });
+    const result = await runTool(call);
+    deps.turns.settleHarness(call.id, result, false);
+    return result.content;
   }
 }
 
@@ -766,5 +800,138 @@ describe("streamPrompt: end of turn", () => {
     const events = await h.run([user("hola")], { sessionId: "pi-1", signal: controller.signal });
     expect(events.at(-1)).toMatchObject({ type: "error", reason: "aborted" });
     expect(h.conn.callsOf("prompt")).toEqual([]);
+  });
+});
+
+/** A harness tool as claude-agent-acp reports it: the MCP server name prefixes the tool name. */
+const harnessReport = (toolCallId: string, name: string): SessionUpdate =>
+  toolCall(toolCallId, `mcp__pi__${name}`, `mcp__pi__${name}`, { kind: "other", status: "pending" });
+
+describe("streamPrompt: harness tools", () => {
+  it("runs a harness tool the agent calls as a real Pi tool call and answers the agent with its result", async () => {
+    const h = harness();
+    const answers: unknown[] = [];
+    h.conn.onPrompt = async (params, fake) => {
+      fake.emit(params.sessionId, text("Calculo."));
+      fake.emit(params.sessionId, harnessReport("t1", "eval"));
+      answers.push(await h.deps.turns.callHarness("pi-1", "eval", { code: "1 + 1" }));
+      fake.emit(params.sessionId, text("Da 2."));
+      return { stopReason: "end_turn" };
+    };
+    const run = await h.loop([user("calculá")]);
+    expect(finalText(run.segments[0] ?? [])).toBe("Calculo.");
+    expect(run.harness).toEqual([{ name: "eval", arguments: { code: "1 + 1" } }]);
+    expect(run.bursts).toEqual([]);
+    expect(answers).toEqual([
+      { content: [{ type: "text", text: 'eval: {"code":"1 + 1"}' }], isError: false },
+    ]);
+    expect(finalText(run.segments[1] ?? [])).toBe("Da 2.");
+    expect(h.conn.callsOf("prompt")).toHaveLength(1);
+  });
+
+  it("ends the burst at a harness tool and shows its open tools after the harness tool, in the same message", async () => {
+    const h = harness();
+    h.conn.onPrompt = async (params, fake) => {
+      fake.emit(params.sessionId, toolCall("r1", "Read", "Read a.ts", { kind: "read" }));
+      fake.emit(params.sessionId, toolCall("r2", "Read", "Read b.ts", { kind: "read" }));
+      fake.emit(params.sessionId, {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "r1",
+        status: "completed",
+      });
+      fake.emit(params.sessionId, harnessReport("t1", "eval"));
+      await h.deps.turns.callHarness("pi-1", "eval", { code: "x" });
+      fake.emit(params.sessionId, text("Listo."));
+      return { stopReason: "end_turn" };
+    };
+    // While Pi runs eval, the agent finishes reading b.ts.
+    const run = await h.loop([user("leé")], { sessionId: "pi-1" }, [], async (call) => {
+      h.conn.emit("acp-1", { sessionUpdate: "tool_call_update", toolCallId: "r2", status: "completed" });
+      return echoTool(call);
+    });
+    const toolCalls = (events: AssistantMessageEvent[]) => {
+      const last = events.at(-1);
+      return last?.type === "done" ? last.message.content.filter((block) => block.type === "toolCall") : [];
+    };
+    expect(toolCalls(run.segments[1] ?? []).map((call) => call.name)).toEqual(["eval", ACTIVITY_TOOL]);
+    expect(run.bursts.map((burst) => burst.tools.map((tool) => [tool.id, tool.status]))).toEqual([
+      [["r1", "completed"]],
+      [["r2", "completed"]],
+    ]);
+    expect(finalText(run.segments[2] ?? [])).toBe("Listo.");
+  });
+
+  it("keeps the harness tool's own report out of the bursts", async () => {
+    const h = harness();
+    h.conn.onPrompt = async (params, fake) => {
+      fake.emit(params.sessionId, toolCall("r1", "Read", "Read a.ts", { kind: "read" }));
+      fake.emit(params.sessionId, harnessReport("t1", "eval"));
+      fake.emit(params.sessionId, {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "r1",
+        status: "completed",
+      });
+      await h.deps.turns.callHarness("pi-1", "eval", { code: "x" });
+      return { stopReason: "end_turn" };
+    };
+    const run = await h.loop([user("leé")]);
+    expect(run.bursts.flatMap((burst) => burst.tools.map((tool) => tool.id))).toEqual(["r1"]);
+  });
+
+  it("answers the agent with an error when Pi drops the turn while the harness tool waits", async () => {
+    const h = harness();
+    const answers: unknown[] = [];
+    h.conn.onPrompt = async (params, fake) => {
+      fake.emit(params.sessionId, harnessReport("t1", "eval"));
+      answers.push(await h.deps.turns.callHarness("pi-1", "eval", { code: "while True: pass" }));
+      return { stopReason: "cancelled" };
+    };
+    // Pi's agent_end discards a turn its loop left behind (src/index.ts); this tool never ends.
+    void h.loop([user("colgate")], { sessionId: "pi-1" }, [], () => {
+      h.deps.turns.discard("pi-1");
+      return new Promise(() => {});
+    });
+    await until(() => answers.length > 0);
+    expect(answers).toEqual([
+      { content: [{ type: "text", text: "The user cancelled the turn." }], isError: true },
+    ]);
+  });
+
+  it("answers a harness call with an error when its Pi session has no live turn", async () => {
+    const h = harness();
+    expect(await h.deps.turns.callHarness("pi-1", "eval", {})).toEqual({
+      content: [{ type: "text", text: "No turn is running in this Pi session." }],
+      isError: true,
+    });
+  });
+
+  it("offers the agent every Pi tool except the ones it already has and the activity tool", async () => {
+    const h = harness();
+    const tool = (name: string) => ({ name, description: name, parameters: Type.Object({}) });
+    const tools = [
+      "read",
+      "bash",
+      "edit",
+      "write",
+      "grep",
+      "find",
+      "ls",
+      ACTIVITY_TOOL,
+      "eval",
+      "codemode",
+    ].map(tool);
+    for await (const _ of streamPrompt(
+      MODEL,
+      normalizeContext({ messages: [user("hola")], tools }),
+      { sessionId: "pi-1" },
+      h.deps,
+    ));
+    expect(h.offered).toEqual([["pi-1", ["eval", "codemode"]]]);
+  });
+
+  it("offers no tools for Pi internal calls", async () => {
+    const h = harness();
+    await h.run([user("resumí")], { sessionId: "pi-internal" });
+    expect(h.offered).toEqual([]);
   });
 });

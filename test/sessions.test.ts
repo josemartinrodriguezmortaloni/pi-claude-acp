@@ -24,11 +24,18 @@ import { FakeConnection } from "./fake-connection.ts";
 const ASK = { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "ask" } };
 const MCP: McpServer[] = [{ name: "engram", command: "engram", args: ["mcp"], env: [] }];
 const anyBranch = () => true;
+/** The harness MCP server of one Pi session (src/harness-server.ts). */
+const harnessOf = (piSessionId: string): McpServer => ({
+  type: "http",
+  name: "pi",
+  url: "http://127.0.0.1:1/mcp",
+  headers: [{ name: "authorization", value: `Bearer ${piSessionId}` }],
+});
 
 function store() {
   const observed: unknown[] = [];
   const s = new SessionStore({
-    mcpServers: async () => MCP,
+    mcpServers: async (piSessionId) => (piSessionId ? [...MCP, harnessOf(piSessionId)] : MCP),
     contextBlock: async (cwd) => `contexto de ${cwd}`,
     onConfig: (configOptions) => observed.push(configOptions),
     mode: () => "default",
@@ -70,9 +77,19 @@ describe("SessionStore.ensure", () => {
       expect(options.allowDangerouslySkipPermissions).toBe(false);
       expect(hookCommandOutput(params._meta)).toEqual({ matcher: "*", output: ASK });
       expect(params.cwd).toBe("/work");
-      expect(params.mcpServers).toEqual(MCP);
     }
     expect(conn.callsOf("newSession")).toHaveLength(2);
+  });
+
+  it("gives the session of a Pi session the harness server of that Pi session, and a disposable session none", async () => {
+    const conn = new FakeConnection();
+    const { store: s } = store();
+    await s.ensure(conn, "pi-1", "/work", anyBranch);
+    await s.ephemeral(conn, "/work");
+    expect(conn.callsOf("newSession").map((params) => params.mcpServers)).toEqual([
+      [...MCP, harnessOf("pi-1")],
+      MCP,
+    ]);
   });
 
   it("C27: switches every created or resumed session to the default mode", async () => {
@@ -106,7 +123,7 @@ describe("SessionStore.ensure", () => {
     expect(conn.callsOf("resumeSession")[0]).toMatchObject({
       sessionId: "acp-saved",
       cwd: "/work",
-      mcpServers: MCP,
+      mcpServers: [...MCP, harnessOf("pi-1")],
     });
     expect(conn.callsOf("newSession")).toEqual([]);
   });

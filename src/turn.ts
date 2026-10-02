@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type * as acp from "@agentclientprotocol/sdk";
+import type { ImageContent, JsonObject, TextContent } from "@earendil-works/pi-ai";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { Burst, type BurstDetails, ToolBook, type ToolEntry } from "./burst.ts";
 import { Reasoning, type ReasoningDetails } from "./reasoning.ts";
 
@@ -9,8 +11,35 @@ import { Reasoning, type ReasoningDetails } from "./reasoning.ts";
  */
 export type TurnEvent =
   | { kind: "update"; update: acp.SessionUpdate }
+  | { kind: "harness"; call: HarnessCall }
   | { kind: "end"; response: acp.PromptResponse; cost: number }
   | { kind: "error"; error: unknown };
+
+/** What a harness tool returns in Pi: its tool result content. */
+export interface PiToolResult {
+  content: (TextContent | ImageContent)[];
+}
+
+/** A harness tool the agent called (docs/adr/0002). It waits until Pi runs it as a tool call of its own. */
+export class HarnessCall {
+  readonly id = `harness-${randomUUID()}`;
+  readonly result: Promise<CallToolResult>;
+  #resolve: (result: CallToolResult) => void = () => {};
+
+  constructor(
+    readonly name: string,
+    readonly args: JsonObject,
+  ) {
+    this.result = new Promise((resolve) => {
+      this.#resolve = resolve;
+    });
+  }
+
+  /** The first result wins: a cancel after Pi's own result changes nothing. */
+  settle(result: CallToolResult): void {
+    this.#resolve(result);
+  }
+}
 
 /** What the activity tool shows: a burst of tools or a run of reasoning. */
 export type ActivityDetails = BurstDetails | ReasoningDetails;
@@ -52,6 +81,8 @@ export class LiveTurn {
   #cancelPrompt: () => void = () => {};
   #burst: Burst | undefined;
   #reasoning: Reasoning | undefined;
+  /** Tools of a burst a harness tool ended while they still ran. The next burst shows them. */
+  #carried: string[] = [];
   /** Messages the user wrote while this turn ran (Pi's steering). Each is a list of content blocks. */
   readonly #steers: acp.ContentBlock[][] = [];
 
@@ -103,6 +134,22 @@ export class LiveTurn {
     return burst;
   }
 
+  /** A burst that goes on with the tools a harness tool call left open. */
+  continueBurst(): Burst | undefined {
+    const ids = this.#carried.splice(0);
+    if (ids.length === 0) return undefined;
+    const burst = new Burst(`burst-${randomUUID()}`, this.tools);
+    for (const id of ids) burst.add(id);
+    this.#burst = burst;
+    return burst;
+  }
+
+  /** Ends the open burst at a harness tool call: its tools that still run move to the next burst. */
+  handOff(): void {
+    this.#carried = this.#burst?.releaseOpen() ?? [];
+    this.endActivity();
+  }
+
   startReasoning(): Reasoning {
     const reasoning = new Reasoning(`reasoning-${randomUUID()}`);
     this.#reasoning = reasoning;
@@ -127,6 +174,7 @@ export class LiveTurn {
 export class TurnRegistry {
   readonly #turns = new Map<string, LiveTurn>();
   readonly #activities = new Map<string, { activity: Activity; turn: LiveTurn }>();
+  readonly #harnessCalls = new Map<string, HarnessCall>();
 
   open(
     key: string | undefined,
@@ -164,6 +212,41 @@ export class TurnRegistry {
     this.#activities.delete(id);
     return entry;
   }
+
+  /**
+   * Hands a harness tool call of the agent to the live turn of `key`. It resolves with what Pi's run
+   * of the tool returns, or with an error when the turn ends first.
+   */
+  callHarness(key: string, name: string, args: Record<string, unknown>): Promise<CallToolResult> {
+    const turn = this.live(key);
+    if (!turn) return Promise.resolve(harnessError(NO_TURN));
+    // MCP arguments arrive as parsed JSON.
+    const call = new HarnessCall(name, args as JsonObject);
+    this.#harnessCalls.set(call.id, call);
+    const stop = onAbort(turn.signal, () => this.#settle(call.id, harnessError(CANCELLED)));
+    void call.result.then(stop);
+    turn.events.push({ kind: "harness", call });
+    return call.result;
+  }
+
+  /** Pi finished the tool call `id`. When it runs a harness call, the agent gets the result. */
+  settleHarness(id: string, result: PiToolResult, isError: boolean): void {
+    this.#settle(id, { content: result.content, isError });
+  }
+
+  #settle(id: string, result: CallToolResult): void {
+    const call = this.#harnessCalls.get(id);
+    this.#harnessCalls.delete(id);
+    call?.settle(result);
+  }
+}
+
+/** Texts for the agent, not the user: they stay in English. */
+const NO_TURN = "No turn is running in this Pi session.";
+const CANCELLED = "The user cancelled the turn.";
+
+function harnessError(text: string): CallToolResult {
+  return { content: [{ type: "text", text }], isError: true };
 }
 
 /** Runs `action` once if `signal` aborts; the returned function stops watching. */

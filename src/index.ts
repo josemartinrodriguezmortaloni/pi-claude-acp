@@ -5,6 +5,7 @@ import { activityTool } from "./activity.ts";
 import { Catalog } from "./catalog.ts";
 import { adapterConnection, createLog, type Log, type SharedConnection } from "./connection.ts";
 import { answerElicitation } from "./elicitation.ts";
+import { HarnessServer } from "./harness-server.ts";
 import { attachToTerminal, LOGIN_COMMAND, type LoginDeps, login, warnIfLoggedOut } from "./login.ts";
 import { copy } from "./messages.ts";
 import { MODE_SHORTCUT, ModeControl } from "./mode-control.ts";
@@ -56,13 +57,17 @@ export async function registerClaudeAcp(
   };
   const catalog = new Catalog((models) => register(models));
   const turns = new TurnRegistry();
+  const harness = new HarnessServer((key, name, args) => turns.callHarness(key, name, args));
   const modes: ModeControl = new ModeControl({
     applyMode: (piSessionId, mode) => store.setMode(piSessionId, mode),
     persist: (mode) => pi.appendEntry(MODE_ENTRY, { mode }),
   });
   const sessionId = () => requireCtx().sessionManager.getSessionId();
   const store: SessionStore = new SessionStore({
-    mcpServers: () => loadMcpServers(join(agentDir, "mcp.json")),
+    mcpServers: async (piSessionId) => {
+      const configured = await loadMcpServers(join(agentDir, "mcp.json"));
+      return piSessionId ? [...configured, await harness.describe(piSessionId)] : configured;
+    },
     contextBlock: async (cwd) =>
       buildContextBlock(await loadContextSources(agentDir, cwd, skillsFromCommands(pi.getCommands()))),
     onConfig: (configOptions) => catalog.observe(configOptions),
@@ -94,6 +99,7 @@ export async function registerClaudeAcp(
     onContextWindow: (modelId, size) => catalog.setContextWindow(modelId, size),
     noteCompaction: (session, update) => store.noteCompaction(session, update),
     onModeChange: (modeId) => void modes.agentChanged(requireCtx(), modeId),
+    offerTools: (piSessionId, tools) => harness.setTools(piSessionId, tools),
     turns,
     isAgentSession: (sessionId) =>
       sessionId !== undefined && sessionId === ctx?.sessionManager.getSessionId(),
@@ -165,8 +171,13 @@ export async function registerClaudeAcp(
     current.ui.setWidget(PLAN_WIDGET, undefined);
     current.ui.setWidget(SUBAGENT_WIDGET, undefined);
     ctx = undefined;
-    if (event.reason === "quit" || event.reason === "reload") adapter.close();
+    if (event.reason === "quit" || event.reason === "reload") {
+      adapter.close();
+      void harness.close();
+    }
   });
+  // Pi ran a tool call; when it is a harness call, the agent waits for this result (docs/adr/0002).
+  pi.on("tool_execution_end", (event) => turns.settleHarness(event.toolCallId, event.result, event.isError));
   pi.on("model_select", (_event, current) => modes.showStatus(current));
   pi.on("session_before_compact", (_event, current) =>
     shouldCancelCompaction(current.model) ? { cancel: true } : undefined,

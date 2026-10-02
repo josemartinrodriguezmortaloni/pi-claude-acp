@@ -44,6 +44,7 @@ const deps: StreamDeps = {
   elicit: async () => ({ action: "decline" }),
   notify: () => {},
   onModeChange: () => {},
+  offerTools: () => {},
   // The smoke turn runs in one Pi message: it checks the ACP path, not the activity tool.
   turns: new TurnRegistry(),
   isAgentSession: () => false,

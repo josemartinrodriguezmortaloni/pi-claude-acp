@@ -142,6 +142,13 @@ export class Burst {
     return { tools: this.#ids.map((id) => structuredClone(this.book.get(id))) };
   }
 
+  /** Takes the tools that still run out of this burst and returns their ids. */
+  releaseOpen(): string[] {
+    const open = this.#ids.filter((id) => OPEN.has(this.book.get(id).status));
+    this.#ids.splice(0, this.#ids.length, ...this.#ids.filter((id) => !open.includes(id)));
+    return open;
+  }
+
   subscribe(listener: (details: BurstDetails) => void): () => void {
     this.#listeners.add(listener);
     listener(this.details());

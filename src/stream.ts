@@ -9,6 +9,7 @@ import {
   type SimpleStreamOptions,
   type TextContent,
   type ThinkingContent,
+  type Tool,
   type ToolCall,
   type TranscriptContext,
   type Usage,
@@ -17,11 +18,19 @@ import {
 import { ACTIVITY_TOOL } from "./activity.ts";
 import type { ToolEntry } from "./burst.ts";
 import { type AcpConnection, errorText, type Log } from "./connection.ts";
+import { harnessTools, isHarnessReport } from "./harness.ts";
 import { LOGIN_HINT } from "./login.ts";
 import { copy } from "./messages.ts";
 import type { Reasoning } from "./reasoning.ts";
 import type { AcpSession, OpenTurn, TurnRequest } from "./sessions.ts";
-import { type Activity, type LiveTurn, onAbort, type TurnEvent, type TurnRegistry } from "./turn.ts";
+import {
+  type Activity,
+  type HarnessCall,
+  type LiveTurn,
+  onAbort,
+  type TurnEvent,
+  type TurnRegistry,
+} from "./turn.ts";
 
 const AUTH_REQUIRED_CODE = -32000;
 /** Updates that carry the model's own words. */
@@ -57,6 +66,8 @@ export interface StreamDeps {
   noteCompaction(session: AcpSession, update: acp.CompactionUpdate): void;
   /** The agent changed its own mode: it entered plan mode, or a plan approval left it. */
   onModeChange(modeId: string): void;
+  /** Sets the harness tools the agent of the Pi session `sessionId` can call. */
+  offerTools(sessionId: string, tools: Tool[]): void;
   turns: TurnRegistry;
   /** Whether `sessionId` names the Pi session of the agent loop. Other requests are internal calls. */
   isAgentSession(sessionId: string | undefined): boolean;
@@ -121,8 +132,19 @@ async function startSegment(
 ): Promise<AssistantMessageEvent> {
   const live = deps.turns.live(options.sessionId);
   if (isAborted(options.signal)) return abandon(state, live, deps);
+  offerHarnessTools(context, options.sessionId, deps);
   const turn = await turnFor(live, state, context, options, deps);
   return runSegment({ state, turn, options, deps, push }, options.signal);
+}
+
+/** Pi's tools can change between calls; the agent sees the current ones. Internal calls get none. */
+function offerHarnessTools(
+  context: TranscriptContext,
+  sessionId: string | undefined,
+  deps: StreamDeps,
+): void {
+  if (sessionId !== undefined && deps.isAgentSession(sessionId))
+    deps.offerTools(sessionId, harnessTools(context));
 }
 
 /**
@@ -321,16 +343,22 @@ const STEPS: {
   [K in TurnEvent["kind"]]: (event: Extract<TurnEvent, { kind: K }>, segment: Segment) => StepResult;
 } = {
   update: (event, segment) => segmentUpdate(event.update, segment),
+  harness: (event, segment) => closeWithHarness(event.call, segment),
   end: (event, segment) => endTurn(event, segment),
   error: (event, segment) => failTurn(event.error, segment),
 };
 
 function segmentUpdate(update: acp.SessionUpdate, segment: Segment): AssistantMessageEvent | undefined {
-  if (isSubagent(update)) return undefined;
+  if (isShownElsewhere(update)) return undefined;
   const open = activityOpener(update, segment.turn);
   if (open) return open(update as never, segment);
   segment.push(mapOrLog(update, segment.state, segment.deps));
   return undefined;
+}
+
+/** Subagent output shows in its Task tool; a harness tool, as Pi's own tool call. */
+function isShownElsewhere(update: acp.SessionUpdate): boolean {
+  return isSubagent(update) || isHarnessReport(update);
 }
 
 type Opener<K extends acp.SessionUpdate["sessionUpdate"]> = (
@@ -367,15 +395,39 @@ function openReasoning(text: string, segment: Segment): AssistantMessageEvent {
 
 /** Ends this Pi message with the activity tool call that shows `activity`. */
 function closeWithActivity(activity: Activity, segment: Segment): AssistantMessageEvent {
-  const { state, turn, deps, push } = segment;
+  return closeWithToolCalls([activityCall(activity, segment)], segment);
+}
+
+/**
+ * Ends this Pi message with the harness tool call, so Pi runs the tool (docs/adr/0002). The tools of
+ * the burst that still run follow in a new activity: Pi runs the calls in order, and that activity
+ * only ends after the agent has the harness result.
+ */
+function closeWithHarness(call: HarnessCall, segment: Segment): AssistantMessageEvent {
+  const toolCalls: ToolCall[] = [{ type: "toolCall", id: call.id, name: call.name, arguments: call.args }];
+  const burst = segment.turn.continueBurst();
+  if (burst) {
+    void fillBurst(segment.turn);
+    toolCalls.push(activityCall(burst, segment));
+  }
+  return closeWithToolCalls(toolCalls, segment);
+}
+
+function activityCall(activity: Activity, segment: Segment): ToolCall {
+  segment.deps.turns.addActivity(activity, segment.turn);
+  return { type: "toolCall", id: activity.id, name: ACTIVITY_TOOL, arguments: {} };
+}
+
+function closeWithToolCalls(toolCalls: ToolCall[], segment: Segment): AssistantMessageEvent {
+  const { state, push } = segment;
   push(closeBlock(state));
-  deps.turns.addActivity(activity, turn);
-  const toolCall: ToolCall = { type: "toolCall", id: activity.id, name: ACTIVITY_TOOL, arguments: {} };
-  const contentIndex = state.message.content.push(toolCall) - 1;
-  push([
-    { type: "toolcall_start", contentIndex, partial: state.message },
-    { type: "toolcall_end", contentIndex, toolCall, partial: state.message },
-  ]);
+  for (const toolCall of toolCalls) {
+    const contentIndex = state.message.content.push(toolCall) - 1;
+    push([
+      { type: "toolcall_start", contentIndex, partial: state.message },
+      { type: "toolcall_end", contentIndex, toolCall, partial: state.message },
+    ]);
+  }
   state.message.stopReason = "toolUse";
   return { type: "done", reason: "toolUse", message: state.message };
 }
@@ -398,10 +450,11 @@ async function fillReasoning(turn: LiveTurn, reasoning: Reasoning): Promise<void
   }
 }
 
-/** `event` belongs to what comes next: it goes back to the queue. */
+/** `event` belongs to what comes next: it goes back to the queue. A harness call hands the burst off. */
 function closeActivity(turn: LiveTurn, event: TurnEvent): void {
   turn.events.putBack(event);
-  turn.endActivity();
+  if (event.kind === "harness") turn.handOff();
+  else turn.endActivity();
 }
 
 function continuesReasoning(event: TurnEvent): event is Extract<TurnEvent, { kind: "update" }> {
@@ -434,9 +487,13 @@ type BurstStep<K extends acp.SessionUpdate["sessionUpdate"]> = (
 
 /** A burst takes in the tools that start and what subagents write; everything else passes by. */
 const BURST_UPDATES: { [K in acp.SessionUpdate["sessionUpdate"]]?: BurstStep<K> } = {
-  tool_call: (update, turn) => turn.burst?.add(update.toolCallId),
+  tool_call: (update, turn) => addTool(update, turn),
   agent_message_chunk: (update, turn) => addSubagentText(update, turn),
 };
+
+function addTool(update: acp.SessionUpdate & { toolCallId: string }, turn: LiveTurn): void {
+  if (!isHarnessReport(update)) turn.burst?.add(update.toolCallId);
+}
 
 function addSubagentText(update: acp.SessionUpdate, turn: LiveTurn): void {
   const parentId = parentToolUseId(update);

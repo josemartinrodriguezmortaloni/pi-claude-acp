@@ -39,3 +39,7 @@ _Avoid_: notice, notificación del agente
 **Razonamiento**:
 El thinking que el modelo emite antes de responder o de usar una herramienta.
 _Avoid_: chain of thought, pensamiento
+
+**Herramienta del harness**:
+Una herramienta que registra Pi o una extensión de Pi y que el agente llama a través del harness. El harness la ejecuta y la muestra como propia.
+_Avoid_: herramienta espejo, Pi tool, tool externa

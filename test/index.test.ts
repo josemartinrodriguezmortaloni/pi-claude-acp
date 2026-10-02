@@ -1,7 +1,10 @@
-import { normalizeContext } from "@earendil-works/pi-ai";
+import { type AssistantMessage, normalizeContext, Type } from "@earendil-works/pi-ai";
 import { createEventBus, type ExtensionAPI, type ProviderConfig } from "@earendil-works/pi-coding-agent";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { describe, expect, it } from "vitest";
 import type { AcpConnection, SharedConnection } from "../src/connection.ts";
+import type { HttpMcpServer } from "../src/harness-server.ts";
 import { registerClaudeAcp } from "../src/index.ts";
 import { copy } from "../src/messages.ts";
 import { FakeConnection } from "./fake-connection.ts";
@@ -141,5 +144,66 @@ describe("registerClaudeAcp", () => {
     expect(shared.closes).toBe(0);
     handlers.get("session_shutdown")?.({ reason: "quit" }, fakeCtx());
     expect(shared.closes).toBe(1);
+  });
+
+  it("runs a Pi tool the agent calls through the harness MCP server and answers with Pi's result", async () => {
+    const conn = new FakeConnection();
+    const { providers, handlers } = await setup(conn);
+    const ctx = fakeCtx();
+    handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, ctx);
+    const provider = providers.at(-1);
+    const model = { ...provider?.models?.[0], provider: "claude-acp", api: "claude-acp" } as never;
+    const offered: string[] = [];
+    const answers: unknown[] = [];
+    // The agent connects to the harness server it got in session/new, as Claude Code does.
+    conn.onPrompt = async () => {
+      const servers = (conn.callsOf("newSession").at(-1)?.mcpServers ?? []) as HttpMcpServer[];
+      const server = servers.find((entry) => entry.name === "pi");
+      if (!server) throw new Error("no harness server");
+      const headers = Object.fromEntries(server.headers.map((header) => [header.name, header.value]));
+      const client = new Client({ name: "claude-code", version: "1.0.0" });
+      await client.connect(
+        new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers } }),
+      );
+      offered.push(...(await client.listTools()).tools.map((tool) => tool.name));
+      answers.push(await client.callTool({ name: "eval", arguments: { code: "2 + 2" } }));
+      await client.close();
+      return { stopReason: "end_turn" };
+    };
+    const tools = ["read", "eval"].map((name) => ({
+      name,
+      description: name,
+      parameters: Type.Object({ code: Type.String() }),
+    }));
+    const messages = [{ role: "user" as const, content: "sumá", timestamp: 0 }];
+    const first = (await provider
+      ?.streamSimple?.(model, normalizeContext({ messages, tools }), {
+        sessionId: "pi-1",
+      })
+      ?.result()) as AssistantMessage;
+    const call = first.content.find((block) => block.type === "toolCall");
+    expect(call).toMatchObject({ name: "eval", arguments: { code: "2 + 2" } });
+    const result = { content: [{ type: "text" as const, text: "4" }], details: {} };
+    handlers.get("tool_execution_end")?.(
+      { type: "tool_execution_end", toolCallId: call?.id, toolName: "eval", result, isError: false },
+      ctx,
+    );
+    const toolResult = {
+      role: "toolResult" as const,
+      toolCallId: call?.id ?? "",
+      toolName: "eval",
+      content: result.content,
+      isError: false,
+      timestamp: 0,
+    };
+    const second = await provider
+      ?.streamSimple?.(model, normalizeContext({ messages: [...messages, first, toolResult], tools }), {
+        sessionId: "pi-1",
+      })
+      ?.result();
+    expect(second?.stopReason).toBe("stop");
+    expect(offered).toEqual(["eval"]);
+    expect(answers).toEqual([{ content: [{ type: "text", text: "4" }], isError: false }]);
+    handlers.get("session_shutdown")?.({ reason: "quit" }, ctx);
   });
 });
