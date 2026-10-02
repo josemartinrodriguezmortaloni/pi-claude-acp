@@ -69,6 +69,26 @@ describe("ToolBook", () => {
     expect(tools.get("t1").output).toBe("no such file");
   });
 
+  it("keeps 20 lines of a long output, each up to 500 characters, and counts every line", () => {
+    const { tools } = book();
+    const secrets = Array.from({ length: 300 }, (_, index) => `SECRET_${index}=${"x".repeat(600)}`);
+    tools.report({ toolCallId: "t1", status: "completed", rawOutput: `${secrets.join("\n")}\n` });
+    const entry = tools.get("t1");
+    expect(entry.outputLines).toBe(300);
+    expect(entry.output.split("\n")).toHaveLength(20);
+    expect(entry.output).not.toContain("SECRET_20=");
+    expect(Math.max(...entry.output.split("\n").map((line) => line.length))).toBe(500);
+  });
+
+  it("keeps the end of a long subagent text, where its answer is", () => {
+    const { tools } = book();
+    tools.addSubagentText("task", "a".repeat(30_000));
+    tools.addSubagentText("task", "respuesta");
+    const text = tools.get("task").subagentText ?? "";
+    expect(text).toHaveLength(20_000);
+    expect(text.endsWith("respuesta")).toBe(true);
+  });
+
   it("keeps a rejection when ACP later reports the tool as failed", () => {
     const { tools } = book();
     tools.mark("t1", "rejected");

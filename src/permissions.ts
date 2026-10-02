@@ -6,9 +6,11 @@ import type {
   ToolCallUpdate,
 } from "@agentclientprotocol/sdk";
 import type { EventBus, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { toolNameOf } from "./claude-code-meta.ts";
 import { oneAtATime } from "./dialogs.ts";
 import { copy } from "./messages.ts";
 import { approvePlan, isPlanApproval, type PlanContext } from "./plan-approval.ts";
+import { printable } from "./terminal-text.ts";
 
 /** Channel on `pi.events` where validator plugins vote on each Claude Code tool call. */
 export const TOOL_REQUEST_EVENT = "claude-acp:tool-request";
@@ -51,13 +53,23 @@ const VERDICTS: Record<Vote, Verdict> = {
   ask: (ctx, toolCall, options) => askUser(ctx, toolCall, options),
 };
 
-/** Answers a permission request of the agent. A plan approval is the user's alone. */
+/** Answers a permission request of the agent. */
 export async function decide(
   request: RequestPermissionRequest,
   ctx: DecideContext,
 ): Promise<RequestPermissionResponse> {
-  if (isPlanApproval(request)) return approvePlan(request, { ...ctx.plan, ui: ctx.ui, signal: ctx.signal });
+  if (isPlanApproval(request)) return decidePlan(request, ctx);
   return decideTool(request, ctx);
+}
+
+/** Validators can refuse a plan, but only the user approves one. */
+async function decidePlan(
+  request: RequestPermissionRequest,
+  ctx: DecideContext,
+): Promise<RequestPermissionResponse> {
+  const votes = await collectVotes(ctx, request.toolCall, request.options);
+  if (votes.some(isDeny)) return VERDICTS.deny(ctx, request.toolCall, request.options);
+  return approvePlan(request, { ...ctx.plan, ui: ctx.ui, signal: ctx.signal });
 }
 
 /** Only validators, the session mode or the user can approve a tool call. */
@@ -149,21 +161,28 @@ function selected(option: PermissionOption): RequestPermissionResponse {
   return { outcome: { outcome: "selected", optionId: option.optionId } };
 }
 
+/** The agent writes the command: an escape sequence in it could hide part of what the user approves. */
 function dialogTitle(toolCall: ToolCallUpdate): string {
-  return copy.permissionTitle(toolName(toolCall), toolDetail(toolCall));
+  return printable(copy.permissionTitle(toolName(toolCall), toolDetail(toolCall)));
 }
 
 /** The tool's own name ("Bash", "Read"): the adapter's title already repeats the command or path. */
 function toolName(toolCall: ToolCallUpdate): string {
-  const meta = Object(Object(toolCall._meta).claudeCode) as { toolName?: unknown };
-  return firstString([meta.toolName, toolCall.title]) || copy.unknownTool;
+  return firstString([toolNameOf(toolCall), toolCall.title]) || copy.unknownTool;
 }
 
-/** The command or path the tool acts on. */
+/** The command or path the tool acts on; else its whole input, such as the code a harness tool runs. */
 function toolDetail(toolCall: ToolCallUpdate): string {
   const input = Object(toolCall.rawInput) as { command?: unknown; file_path?: unknown };
   const paths = (toolCall.locations ?? []).map((location) => location.path);
-  return firstString([input.command, input.file_path, ...paths]);
+  return firstString([input.command, input.file_path, ...paths]) || inputText(toolCall.rawInput);
+}
+
+/** One line per field. Nothing is cut: the part left out could be what the user should not approve. */
+function inputText(rawInput: unknown): string {
+  return Object.entries(Object(rawInput))
+    .map(([field, value]) => `${field}: ${typeof value === "string" ? value : JSON.stringify(value)}`)
+    .join("\n");
 }
 
 function firstString(values: unknown[]): string {

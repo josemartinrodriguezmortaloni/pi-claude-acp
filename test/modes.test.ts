@@ -1,4 +1,5 @@
-import { homedir } from "node:os";
+import { mkdtemp, symlink } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolCallUpdate } from "@agentclientprotocol/sdk";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
@@ -59,6 +60,18 @@ describe("autoApproves", () => {
     expect(autoApproves("default", edit("/work/a.ts"), "/work")).toBe(false);
     expect(autoApproves("plan", edit("/work/a.ts"), "/work")).toBe(false);
     expect(autoApproves("auto", edit("/work/a.ts"), "/work")).toBe(false);
+  });
+
+  it("follows symlinks: an edit through a link that leaves the working directory asks", async () => {
+    const work = await mkdtemp(join(tmpdir(), "claude-acp-work-"));
+    const outside = await mkdtemp(join(tmpdir(), "claude-acp-outside-"));
+    await symlink(outside, join(work, "docs"));
+    await symlink(join(outside, "not-yet"), join(work, "dangling"));
+    expect(autoApproves("acceptEdits", edit(join(work, "docs", "authorized_keys"), "Write"), work)).toBe(
+      false,
+    );
+    expect(autoApproves("acceptEdits", edit("dangling", "Write"), work)).toBe(false);
+    expect(autoApproves("acceptEdits", edit("src/new.ts", "Write"), work)).toBe(true);
   });
 
   it("checks every location the edit names", () => {

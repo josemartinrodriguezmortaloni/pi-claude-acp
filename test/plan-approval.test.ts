@@ -91,6 +91,26 @@ describe("approvePlan", () => {
     expect(dismissed.sent).toEqual([]);
   });
 
+  it("C25: answers cancelled when the turn is cancelled while the dialog is open", async () => {
+    const controller = new AbortController();
+    const { ctx } = context(undefined);
+    const select = ctx.ui?.select;
+    const cancelling: PlanContext = {
+      ...ctx,
+      signal: controller.signal,
+      ui: ctx.ui && {
+        ...ctx.ui,
+        select: async (...args) => {
+          controller.abort();
+          return select?.(...args);
+        },
+      },
+    };
+    await expect(approvePlan(request([manual, reject]), cancelling)).resolves.toEqual({
+      outcome: { outcome: "cancelled" },
+    });
+  });
+
   it("keeps planning when Pi has no dialog UI", async () => {
     const ctx: PlanContext = { ui: undefined, acceptEditsAfterApproval: () => {}, sendFeedback: () => {} };
     await expect(approvePlan(request([manual, reject]), ctx)).resolves.toEqual(selected("reject"));

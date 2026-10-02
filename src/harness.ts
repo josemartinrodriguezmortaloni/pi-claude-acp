@@ -1,6 +1,7 @@
 import type * as acp from "@agentclientprotocol/sdk";
 import { getCurrentTools, type Tool, type TranscriptContext } from "@earendil-works/pi-ai";
 import { ACTIVITY_TOOL } from "./activity.ts";
+import { toolNameOf } from "./claude-code-meta.ts";
 import { HARNESS_SERVER } from "./harness-server.ts";
 
 /**
@@ -20,6 +21,5 @@ export function harnessTools(context: TranscriptContext): Tool[] {
 
 /** A tool report of a harness tool. Pi shows that call as its own tool, so no burst shows it. */
 export function isHarnessReport(update: acp.SessionUpdate): boolean {
-  const name = Object(Object(Object(update)._meta).claudeCode).toolName;
-  return update.sessionUpdate === "tool_call" && String(name).startsWith(REPORT_PREFIX);
+  return update.sessionUpdate === "tool_call" && toolNameOf(update).startsWith(REPORT_PREFIX);
 }

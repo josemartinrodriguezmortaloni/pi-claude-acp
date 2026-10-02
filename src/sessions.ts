@@ -1,5 +1,3 @@
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import type {
   CompactionUpdate,
   ContentBlock,
@@ -8,7 +6,7 @@ import type {
   SessionModeId,
 } from "@agentclientprotocol/sdk";
 import type { ThinkingLevel } from "@earendil-works/pi-ai";
-import type { SessionEntry, SlashCommandInfo } from "@earendil-works/pi-coding-agent";
+import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import {
   configValue,
   EFFORT_CONFIG_ID,
@@ -18,6 +16,7 @@ import {
   type ProbeSession,
 } from "./catalog.ts";
 import type { AcpConnection } from "./connection.ts";
+import { type McpConfig, moveValuesToEnv } from "./mcp-config.ts";
 import { copy } from "./messages.ts";
 import type { ModeId } from "./modes.ts";
 
@@ -32,11 +31,15 @@ const DEFAULT_MODE: SessionModeId = "default";
 /**
  * Sends every tool call to session/request_permission, except in auto mode: there Claude Code's
  * classifier decides, and only what it escalates reaches Pi. The hook reads its JSON input on stdin;
- * grep keeps it fast, since it runs before every tool call.
+ * grep keeps it fast, since it runs before every tool call. Only the fields before `tool_input` are
+ * read: the agent writes the tool input, and a key `permission_mode` inside it must not skip the dialog.
+ * Should the order change, the cut drops `permission_mode` too and every call asks.
  */
-const ASK_HOOK_COMMAND = `grep -Eq '"permission_mode" *: *"auto"' || printf '%s' '${JSON.stringify({
-  hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "ask" },
-})}'`;
+const ASK_HOOK_COMMAND = `tr -d '\\n' | sed 's/"tool_input".*//' | grep -Eq '"permission_mode" *: *"auto"' || printf '%s' '${JSON.stringify(
+  {
+    hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "ask" },
+  },
+)}'`;
 
 /**
  * Links a Pi session to its ACP session. Persisted with `pi.appendEntry`.
@@ -59,8 +62,8 @@ export interface AcpSession {
 
 export interface OpenedSession {
   session: AcpSession;
-  /** Lines shown to the user before the turn output. */
-  notices: string[];
+  /** Warnings about the session shown to the user before the turn output. */
+  warnings: string[];
 }
 
 export interface TurnRequest {
@@ -91,23 +94,13 @@ export interface SessionDeps {
   mode(piSessionId: string): ModeId;
 }
 
-export interface SkillInfo {
-  name: string;
-  description?: string;
-  path: string;
-}
-
-export interface ContextSources {
-  globalAgents?: string;
-  projectAgents?: string;
-  skills: SkillInfo[];
-}
-
-export function sessionMeta(persist: boolean) {
+/** `env` reaches the Claude Code process of the session: it carries the MCP header and env values. */
+export function sessionMeta(persist: boolean, env: Record<string, string>) {
   return {
     claudeCode: {
       options: {
         settingSources: [],
+        env,
         // Recent models stream empty thinking unless a summary is requested (acp-agent.js:7751);
         // the `showThinkingSummaries` setting does not reach the SDK through the adapter.
         thinking: { type: "adaptive", display: "summarized" },
@@ -152,6 +145,11 @@ export class SessionStore {
     return this.#fresh(conn, piSessionId, cwd, [copy.branchDiverged]);
   }
 
+  /** Closes every live ACP session: their Pi runtime ends, and each one keeps a Claude Code process. */
+  async closeAll(): Promise<void> {
+    await Promise.all([...this.#live.keys()].map((piSessionId) => this.#closeLive(piSessionId)));
+  }
+
   #diverged(
     piSessionId: string,
     record: SessionRecord | undefined,
@@ -169,7 +167,7 @@ export class SessionStore {
   /** Keeps the live session while its connection is the current one. */
   async #reuse(conn: AcpConnection, piSessionId: string, cwd: string, record: SessionRecord | undefined) {
     const live = this.#live.get(piSessionId);
-    if (live?.conn === conn) return { session: live, notices: [] };
+    if (live?.conn === conn) return { session: live, warnings: [] };
     return this.#reopen(conn, piSessionId, cwd, record);
   }
 
@@ -182,11 +180,7 @@ export class SessionStore {
 
   /** A session for Pi's internal calls (compaction, summaries). The caller closes it. */
   async ephemeral(conn: AcpConnection, cwd: string): Promise<AcpSession> {
-    const response = await conn.agent.newSession({
-      cwd,
-      mcpServers: await this.deps.mcpServers(),
-      _meta: sessionMeta(false),
-    });
+    const response = await conn.agent.newSession({ cwd, ...(await this.#sessionParams(false)) });
     const session = newSession(conn, response.sessionId, response.configOptions, false);
     await conn.agent.setSessionMode({ sessionId: session.id, modeId: DEFAULT_MODE });
     return session;
@@ -208,7 +202,7 @@ export class SessionStore {
   async #internalTurn<T>(request: TurnRequest, task: (turn: OpenTurn) => Promise<T>): Promise<T> {
     const session = await this.ephemeral(request.conn, request.cwd);
     try {
-      return await task(await this.#prepare({ session, notices: [] }, request));
+      return await task(await this.#prepare({ session, warnings: [] }, request));
     } finally {
       await request.conn.agent.closeSession({ sessionId: session.id }).catch(() => undefined);
     }
@@ -251,23 +245,25 @@ export class SessionStore {
     if (update.status === "completed") session.needsContext = true;
   }
 
+  /** The MCP servers and options of a new or resumed session. Only a Pi session gets the harness server. */
+  async #sessionParams(persist: boolean, piSessionId?: string) {
+    const mcp: McpConfig = moveValuesToEnv(await this.deps.mcpServers(piSessionId));
+    return { mcpServers: mcp.servers, _meta: sessionMeta(persist, mcp.env) };
+  }
+
   async #fresh(
     conn: AcpConnection,
     piSessionId: string,
     cwd: string,
-    notices: string[],
+    warnings: string[],
   ): Promise<OpenedSession> {
-    const response = await conn.agent.newSession({
-      cwd,
-      mcpServers: await this.deps.mcpServers(piSessionId),
-      _meta: sessionMeta(true),
-    });
+    const response = await conn.agent.newSession({ cwd, ...(await this.#sessionParams(true, piSessionId)) });
     const session = await this.#adopt(
       piSessionId,
       newSession(conn, response.sessionId, response.configOptions, true),
     );
     this.#records.delete(piSessionId);
-    return { session, notices };
+    return { session, warnings };
   }
 
   async #resume(
@@ -277,19 +273,14 @@ export class SessionStore {
     acpSessionId: string,
   ): Promise<OpenedSession> {
     const response = await conn.agent
-      .resumeSession({
-        sessionId: acpSessionId,
-        cwd,
-        mcpServers: await this.deps.mcpServers(piSessionId),
-        _meta: sessionMeta(true),
-      })
+      .resumeSession({ sessionId: acpSessionId, cwd, ...(await this.#sessionParams(true, piSessionId)) })
       .catch(() => undefined);
     if (!response) return this.#fresh(conn, piSessionId, cwd, [copy.resumeFailed]);
     const session = await this.#adopt(
       piSessionId,
       newSession(conn, acpSessionId, response.configOptions, true),
     );
-    return { session, notices: [] };
+    return { session, warnings: [] };
   }
 
   /** Applies a mode change to the live ACP session, if there is one. The next one opens in it anyway. */
@@ -376,16 +367,6 @@ function requireOffered(session: AcpSession, modelId: string): void {
   throw new Error(copy.modelNotOffered(modelId, `${claudeExecutable} ${claudeVersion}`, offered));
 }
 
-export function skillsFromCommands(commands: SlashCommandInfo[]): SkillInfo[] {
-  return commands
-    .filter((command) => command.source === "skill")
-    .map((command) => ({
-      name: command.name.replace(/^skill:/, ""),
-      description: command.description,
-      path: command.sourceInfo.path,
-    }));
-}
-
 /** Whether a saved leaf is still on the current branch. A null leaf predates every entry. */
 export function branchContains(manager: { getBranch(): SessionEntry[] }) {
   return (leafId: string | null) =>
@@ -395,89 +376,4 @@ export function branchContains(manager: { getBranch(): SessionEntry[] }) {
 /** Whether the active Pi model runs through this extension. */
 export function usesClaudeAcp(model: { provider: string } | undefined): boolean {
   return model?.provider === PROVIDER_ID;
-}
-
-/** Claude Code compacts its own history, so Pi's compaction would summarize a transcript it never sends. */
-export function shouldCancelCompaction(model: { provider: string } | undefined): boolean {
-  return usesClaudeAcp(model);
-}
-
-interface PiMcpServer {
-  command?: string;
-  args?: string[];
-  env?: Record<string, string>;
-  url?: string;
-  headers?: Record<string, string>;
-  enabled?: boolean;
-}
-
-/** Reads the MCP servers of `~/.pi/agent/mcp.json` as ACP server descriptions. */
-export async function loadMcpServers(file: string): Promise<McpServer[]> {
-  const text = await readOptional(file);
-  if (text === undefined) return [];
-  const servers = parseJson(file, text).mcpServers ?? {};
-  return Object.entries(servers)
-    .filter(([, server]) => server.enabled !== false)
-    .map(([name, server]) => toAcpServer(name, server));
-}
-
-/** The parse error is not quoted: it can echo file content, such as tokens in headers. */
-function parseJson(file: string, text: string): { mcpServers?: Record<string, PiMcpServer> } {
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new Error(copy.mcpInvalidJson(file));
-  }
-}
-
-/** The file content, or undefined when it does not exist. Other read errors propagate. */
-async function readOptional(path: string): Promise<string | undefined> {
-  return readFile(path, "utf8").catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return undefined;
-    throw error;
-  });
-}
-
-function toAcpServer(name: string, server: PiMcpServer): McpServer {
-  if (server.url) return { type: "http", name, url: server.url, headers: pairs(server.headers) };
-  return stdioServer(name, server);
-}
-
-function stdioServer(name: string, server: PiMcpServer): McpServer {
-  if (!server.command) throw new Error(copy.mcpServerWithoutCommand(name));
-  return { name, command: server.command, args: server.args ?? [], env: pairs(server.env) };
-}
-
-function pairs(record: Record<string, string> | undefined): { name: string; value: string }[] {
-  return Object.entries(record ?? {}).map(([name, value]) => ({ name, value }));
-}
-
-export function buildContextBlock(sources: ContextSources): string {
-  const sections = [
-    section("AGENTS.md global de Pi", sources.globalAgents),
-    section("AGENTS.md del proyecto", sources.projectAgents),
-    section("Skills de Pi (leé el SKILL.md antes de usar una)", skillLines(sources.skills)),
-  ].filter(Boolean);
-  return ["<pi-context>", ...sections, "</pi-context>"].join("\n\n");
-}
-
-function section(title: string, body: string | undefined): string {
-  return body?.trim() ? `## ${title}\n\n${body.trim()}` : "";
-}
-
-function skillLines(skills: SkillInfo[]): string {
-  return skills.map((skill) => `- ${skill.name}: ${skill.description ?? ""} (${skill.path})`).join("\n");
-}
-
-/** Reads the Pi context files for a new ACP session. */
-export async function loadContextSources(
-  agentDir: string,
-  cwd: string,
-  skills: SkillInfo[],
-): Promise<ContextSources> {
-  return {
-    globalAgents: await readOptional(join(agentDir, "AGENTS.md")),
-    projectAgents: await readOptional(join(cwd, "AGENTS.md")),
-    skills,
-  };
 }

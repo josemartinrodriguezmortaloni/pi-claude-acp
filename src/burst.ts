@@ -1,5 +1,6 @@
 import type * as acp from "@agentclientprotocol/sdk";
 import { generateDiffString } from "@earendil-works/pi-coding-agent";
+import { claudeCodeMeta } from "./claude-code-meta.ts";
 
 /** Where a tool is, or how it ended. `awaiting`, `rejected` and `interrupted` come from Pi, not from ACP. */
 export type ToolStatus =
@@ -23,11 +24,13 @@ export interface ToolEntry {
   /** Where a search looks, when it names a place. */
   scope?: string;
   status: ToolStatus;
-  /** Text output: the command output, the content read, the error. */
+  /** The first lines of the text output: the command output, the content read, the error. */
   output: string;
+  /** Lines of the whole output. The rest only count, so the session file keeps no more than the view shows. */
+  outputLines: number;
   /** On a tool a subagent runs: the id of its Task tool. */
   parentId?: string;
-  /** On a Task tool: the text its subagent wrote. */
+  /** On a Task tool: the end of the text its subagent wrote. */
   subagentText?: string;
   /** On Edit and Write: the change to the file. */
   change?: FileChange;
@@ -62,6 +65,12 @@ const SEARCH_TOOLS = new Set(["Grep", "Glob"]);
 const DIFF_CONTEXT_LINES = 3;
 /** Change lines kept in the session. The expanded detail shows at most this many. */
 const MAX_CHANGE_LINES = 80;
+/** Output lines kept in the session: what the expanded detail shows (activity-view.ts). */
+const MAX_OUTPUT_LINES = 20;
+/** Characters kept per output line: a minified file is one long line. */
+const MAX_OUTPUT_LINE_CHARS = 500;
+/** Characters of a subagent's text kept in the session. Its answer comes last. */
+const MAX_SUBAGENT_CHARS = 20_000;
 const DIFF_LINE = /^([+\- ])(\s*)(\d+) /;
 const HUNK_GAP = "   ...";
 /** claude-agent-acp already wraps command output in a fence (renderer.js:206). */
@@ -86,13 +95,13 @@ export class ToolBook {
 
   addSubagentText(parentId: string, text: string): void {
     const entry = this.#entry(parentId);
-    entry.subagentText = (entry.subagentText ?? "") + text;
+    entry.subagentText = ((entry.subagentText ?? "") + text).slice(-MAX_SUBAGENT_CHARS);
     this.onChange();
   }
 
   /** Marks every open tool as interrupted. */
   interruptOpen(): void {
-    for (const entry of this.#tools.values()) if (OPEN.has(entry.status)) entry.status = "interrupted";
+    for (const entry of this.#tools.values()) if (isOpen(entry)) entry.status = "interrupted";
     this.onChange();
   }
 
@@ -144,7 +153,7 @@ export class Burst {
 
   /** Takes the tools that still run out of this burst and returns their ids. */
   releaseOpen(): string[] {
-    const open = this.#ids.filter((id) => OPEN.has(this.book.get(id).status));
+    const open = this.#ids.filter((id) => isOpen(this.book.get(id)));
     this.#ids.splice(0, this.#ids.length, ...this.#ids.filter((id) => !open.includes(id)));
     return open;
   }
@@ -161,8 +170,23 @@ export class Burst {
   }
 }
 
+/** Whether the tool still runs or waits for the user. */
+export function isOpen(tool: ToolEntry): boolean {
+  return OPEN.has(tool.status);
+}
+
+/** "Bash npm test": the tool's name and what it acts on. */
+export function nameAndTarget(tool: ToolEntry): string {
+  return [tool.name, tool.target].filter(Boolean).join(" ");
+}
+
+/** The tools a subagent ran, from every tool of the turn. */
+export function childrenOf(tool: ToolEntry, all: ToolEntry[]): ToolEntry[] {
+  return all.filter((candidate) => candidate.parentId === tool.id);
+}
+
 function emptyEntry(id: string): ToolEntry {
-  return { id, name: "", kind: "other", target: "", status: "pending", output: "" };
+  return { id, name: "", kind: "other", target: "", status: "pending", output: "", outputLines: 0 };
 }
 
 /** The fields `report` carries, merged over what `entry` already knows. */
@@ -173,7 +197,7 @@ function reportedFields(entry: ToolEntry, report: ToolReport): ToolEntry {
     ...named,
     ...targetFields(named, report),
     status: statusAfter(entry.status, report.status),
-    output: textOr(outputOf(report), entry.output),
+    ...outputFields(entry, report),
     parentId: keep(optionalText(claudeCodeMeta(report).parentToolUseId), entry.parentId),
     change: keep(changeOf(report), entry.change),
     plan: keep(optionalText(Object(report.rawInput).plan), entry.plan),
@@ -223,10 +247,6 @@ function shiftLine(line: string, offset: number): string {
   });
 }
 
-function claudeCodeMeta(report: ToolReport): { toolName?: unknown; parentToolUseId?: unknown } {
-  return Object(Object(report._meta).claudeCode);
-}
-
 /** Search tools show their pattern and where they look; the rest show what their title names. */
 function targetFields(entry: ToolEntry, report: ToolReport): Pick<ToolEntry, "target" | "scope"> {
   const input = Object(report.rawInput) as { pattern?: unknown; path?: unknown };
@@ -245,6 +265,15 @@ function titleTarget(name: string, title: string | null | undefined): string {
 
 function statusAfter(current: ToolStatus, reported: acp.ToolCallStatus | null | undefined): ToolStatus {
   return PI_SETTLED.has(current) ? current : (reported ?? current);
+}
+
+/** A report without output keeps the output already known. */
+function outputFields(entry: ToolEntry, report: ToolReport): Pick<ToolEntry, "output" | "outputLines"> {
+  const text = outputOf(report);
+  if (text === "") return { output: entry.output, outputLines: entry.outputLines };
+  const lines = text.replace(/\n$/, "").split("\n");
+  const kept = lines.slice(0, MAX_OUTPUT_LINES).map((line) => line.slice(0, MAX_OUTPUT_LINE_CHARS));
+  return { output: kept.join("\n"), outputLines: lines.length };
 }
 
 function outputOf(report: ToolReport): string {

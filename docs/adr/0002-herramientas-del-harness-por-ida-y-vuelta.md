@@ -12,5 +12,7 @@ El agente no veía las herramientas que registran Pi y sus extensiones (`eval`, 
 
 - Cuando llega una herramienta del harness, la ráfaga en curso termina. Sus herramientas nativas que siguen corriendo pasan a una ráfaga nueva, y el provider cierra el siguiente mensaje de Pi con la herramienta del harness seguida de esa herramienta espejo. El orden importa: si una herramienta del mensaje es `sequential`, como `agent_activity` o `eval`, Pi corre todo el mensaje en serie (`pi-agent-core/dist/agent-loop.js:368`), y una herramienta espejo primero esperaría un texto que el agente no puede escribir sin el resultado del harness.
 - Las herramientas del harness pasan por el mismo Modo que las nativas: el hook `PreToolUse` no las excluye.
+- Pi ejecuta cualquier herramienta activa por su nombre, incluidas sus `bash` y `write` nativas. Por eso el MCP rechaza toda llamada a una herramienta que no ofreció a esa sesión de Pi.
+- El Agent SDK pone los servidores MCP en la línea de comandos de Claude Code (`--mcp-config`), que cualquier usuario local lee en `/proc/<pid>/cmdline`. El token viaja en el entorno del proceso, que solo lee su dueño, y el header lo nombra como `${PI_MCP_<n>}`. Claude Code expande la variable.
 - La máquina de estados de ADR 0001 ahora también continúa el turno ACP cuando el último `toolResult` es de una herramienta del harness.
 - La lista de herramientas sale de `getCurrentTools(messages)` en cada llamada a `streamSimple`, no de `context.tools`, que Pi 0.99.2 ya no envía.

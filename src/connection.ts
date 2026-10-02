@@ -1,7 +1,7 @@
 import { type ChildProcessWithoutNullStreams, execFile, spawn } from "node:child_process";
 import { constants } from "node:fs";
-import { access, appendFile, mkdir } from "node:fs/promises";
-import { delimiter, dirname, join } from "node:path";
+import { access, appendFile, chmod, mkdir, rename, stat } from "node:fs/promises";
+import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import type * as acp from "@agentclientprotocol/sdk";
@@ -15,6 +15,13 @@ const ADAPTER_ENTRY = join(
 );
 const STDERR_TAIL_BYTES = 8192;
 const STDERR_TAIL_LINES = 10;
+/** Past this size the log moves to `<file>.1`, replacing the copy before it. */
+const MAX_LOG_BYTES = 1024 * 1024;
+/**
+ * Pi's Anthropic provider reads these keys. Claude Code would bill that key instead of the Claude
+ * account the user logged in with, so the agent never sees them.
+ */
+const PI_ONLY_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
 
 export type Log = (line: string) => void;
 
@@ -91,18 +98,19 @@ export class SessionRouter {
 
 export async function resolveExecutable(env: ConnectionEnv): Promise<string> {
   if (env.CLAUDE_CODE_EXECUTABLE) return env.CLAUDE_CODE_EXECUTABLE;
-  const found = await findOnPath(env.PATH);
+  const found = await findOnPath("claude", env.PATH);
   if (!found) {
     throw new Error(copy.binaryNotFound);
   }
   return found;
 }
 
-async function findOnPath(pathVariable = ""): Promise<string | undefined> {
+/** A relative PATH entry would resolve in the working directory, which a cloned repo controls. */
+async function findOnPath(name: string, pathVariable = ""): Promise<string | undefined> {
   const candidates = pathVariable
     .split(delimiter)
-    .filter(Boolean)
-    .map((dir) => join(dir, "claude"));
+    .filter(isAbsolute)
+    .map((dir) => join(dir, name));
   const executable = await Promise.all(candidates.map(isExecutable));
   return candidates[executable.indexOf(true)];
 }
@@ -142,13 +150,32 @@ function versionOutput(exe: string): Promise<string> {
   });
 }
 
-/** Appends lines to `file`, in order, without ever writing to the Pi process streams. */
+/**
+ * Appends lines to `file`, in order, without ever writing to the Pi process streams. The adapter
+ * output can carry what tools printed, so only the user reads the log, and it stays small.
+ */
 export function createLog(file: string): Log {
-  let chain: Promise<unknown> = mkdir(dirname(file), { recursive: true }).catch(() => undefined);
+  let chain: Promise<unknown> = ownerOnly(file).catch(() => undefined);
   return (line) => {
     const stamped = `${new Date().toISOString()} ${line.endsWith("\n") ? line : `${line}\n`}`;
-    chain = chain.then(() => appendFile(file, stamped)).catch(() => undefined);
+    chain = chain.then(() => appendLine(file, stamped)).catch(() => undefined);
   };
+}
+
+/** A log written before these modes keeps its old ones until chmod. */
+async function ownerOnly(file: string): Promise<void> {
+  await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+  await chmod(dirname(file), 0o700);
+  await chmod(file, 0o600).catch(() => undefined);
+}
+
+async function appendLine(file: string, line: string): Promise<void> {
+  const size = await stat(file).then(
+    (stats) => stats.size,
+    () => 0,
+  );
+  if (size > MAX_LOG_BYTES) await rename(file, `${file}.1`);
+  await appendFile(file, line, { mode: 0o600 });
 }
 
 /** Launches the adapter and completes the ACP handshake. */
@@ -159,8 +186,9 @@ export async function openConnection(
 ): Promise<AcpConnection> {
   const exe = await resolveExecutable(env);
   const claudeVersion = await validateExecutable(exe);
-  const child = spawn("node", [adapterEntry], {
-    env: { ...process.env, CLAUDE_CODE_EXECUTABLE: exe },
+  // The runtime that runs Pi runs the adapter: no PATH lookup can swap it.
+  const child = spawn(process.execPath, [adapterEntry], {
+    env: { ...agentEnv(process.env), CLAUDE_CODE_EXECUTABLE: exe },
     stdio: ["pipe", "pipe", "pipe"],
   });
   const stderr = captureStderr(child, log);
@@ -211,6 +239,10 @@ export async function openConnection(
       kill();
     },
   };
+}
+
+export function agentEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(env).filter(([name]) => !PI_ONLY_ENV.includes(name)));
 }
 
 function announcesImages(initialized: acp.InitializeResponse): boolean {

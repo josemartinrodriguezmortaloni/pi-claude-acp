@@ -20,6 +20,8 @@ import {
 export const HARNESS_SERVER = "pi";
 const SERVER_INFO = { name: HARNESS_SERVER, version: "1.0.0" };
 const SESSION_HEADER = "mcp-session-id";
+/** A text for the agent: it stays in English. */
+const NOT_OFFERED = (name: string) => `The tool ${name} is not offered in this Pi session.`;
 
 /** How ACP describes an MCP server it reaches over HTTP. */
 export type HttpMcpServer = Extract<acp.McpServer, { type: "http" }>;
@@ -40,7 +42,8 @@ interface Connection {
 
 /**
  * The MCP server that offers the harness tools to the agent (docs/adr/0002). It listens on loopback
- * only, and each Pi session has its own bearer token: the token decides which tools a request sees.
+ * only, and each Pi session has its own bearer token: the token decides which tools a request sees
+ * and calls. The token never goes on a command line (src/mcp-config.ts).
  */
 export class HarnessServer {
   readonly #tools = new Map<string, Tool[]>();
@@ -66,7 +69,10 @@ export class HarnessServer {
     return { type: "http", name: HARNESS_SERVER, url, headers: [authorization] };
   }
 
+  /** Revokes every token, then stops listening. */
   async close(): Promise<void> {
+    this.#keys.clear();
+    this.#tokens.clear();
     const connections = [...this.#connections.values()];
     this.#connections.clear();
     await Promise.all(connections.map((connection) => connection.server.close()));
@@ -76,7 +82,7 @@ export class HarnessServer {
 
   #listen(): Promise<string> {
     this.#url ??= new Promise((resolve) => {
-      const http = createServer((req, res) => void this.#handle(req, res));
+      const http = createServer((req, res) => void this.#handle(req, res).catch(() => refuse(res, 500)));
       this.#http = http;
       http.listen(0, "127.0.0.1", () =>
         resolve(`http://127.0.0.1:${(http.address() as AddressInfo).port}/mcp`),
@@ -124,7 +130,7 @@ export class HarnessServer {
       tools: (this.#tools.get(key) ?? []).map(mcpTool),
     }));
     server.setRequestHandler(CallToolRequestSchema, (request) =>
-      this.call(key, request.params.name, request.params.arguments ?? {}),
+      this.#call(key, request.params.name, request.params.arguments ?? {}),
     );
     const transport: StreamableHTTPServerTransport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomBytes(16).toString("hex"),
@@ -137,6 +143,14 @@ export class HarnessServer {
     });
     void server.connect(transport);
     return { key, server, transport };
+  }
+
+  /** Pi runs any of its active tools by name, so only a tool offered to this session gets to Pi. */
+  #call(key: string, name: string, args: Record<string, unknown>): Promise<CallToolResult> {
+    const offered = (this.#tools.get(key) ?? []).some((tool) => tool.name === name);
+    if (!offered)
+      return Promise.resolve({ content: [{ type: "text", text: NOT_OFFERED(name) }], isError: true });
+    return this.call(key, name, args);
   }
 
   #notify(key: string): void {
@@ -164,5 +178,6 @@ function bearer(req: IncomingMessage): string {
 }
 
 function refuse(res: ServerResponse, status: number): void {
-  res.writeHead(status).end();
+  if (!res.headersSent) res.writeHead(status);
+  res.end();
 }

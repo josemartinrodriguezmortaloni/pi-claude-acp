@@ -1,6 +1,6 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import type { BurstDetails, FileChange, ToolEntry, ToolStatus } from "./burst.ts";
-import { copy, type ToolCategory } from "./messages.ts";
+import { type BurstDetails, childrenOf, type FileChange, type ToolEntry, type ToolStatus } from "./burst.ts";
+import { type ChipCategory, copy, type ToolCategory } from "./messages.ts";
 import type { ReasoningEntry } from "./reasoning.ts";
 import type { ActivityDetails } from "./turn.ts";
 
@@ -9,7 +9,7 @@ export type Painter = Pick<Theme, "fg" | "bold" | "inverse" | "italic">;
 
 /** Output lines a branch shows while the detail is contracted, for commands and failures. */
 const COLLAPSED_LINES = 5;
-/** Output lines a branch shows with the detail expanded. */
+/** Output lines a branch shows with the detail expanded. The session keeps no more (burst.ts). */
 const EXPANDED_LINES = 20;
 const MAX_LINE_CHARS = 200;
 /** Diff lines an edit shows while the detail is contracted. A new file shows none until expanded. */
@@ -52,13 +52,15 @@ const SUMMARY_ORDER: ToolCategory[] = [
 const MAX_PLAN_LINES = 80;
 
 /** Only tools that change the repo or run something carry a chip (PRODUCT.md, principle 2). */
-const CHIPS: Partial<Record<Category, { label: string; color: Parameters<Painter["fg"]>[0] }>> = {
-  plan: { label: "PLAN  ", color: "success" },
-  edit: { label: "EDIT  ", color: "accent" },
-  create: { label: "CREATE", color: "success" },
-  command: { label: "BASH  ", color: "warning" },
-  subagent: { label: "TASK  ", color: "mdLink" },
+const CHIP_COLORS: Record<ChipCategory, Parameters<Painter["fg"]>[0]> = {
+  plan: "success",
+  edit: "accent",
+  create: "success",
+  command: "warning",
+  subagent: "mdLink",
 };
+/** Every chip is as wide as the widest label, so the targets line up. */
+const CHIP_WIDTH = Math.max(...Object.values(copy.chipLabel).map((label) => label.length));
 
 interface Branch {
   last: boolean;
@@ -208,7 +210,8 @@ function label(tool: ToolEntry, branch: Branch): string {
 function labelHead(tool: ToolEntry, paint: Painter): string[] {
   const chip = chipOf(tool);
   if (!chip) return [paint.fg("muted", distinct([tool.name, targetText(tool)]).join(" "))];
-  return [paint.inverse(paint.fg(chip.color, ` ${chip.label} `)), targetText(tool)];
+  const label = copy.chipLabel[chip].padEnd(CHIP_WIDTH);
+  return [paint.inverse(paint.fg(CHIP_COLORS[chip], ` ${label} `)), targetText(tool)];
 }
 
 /** Tools the adapter titles with their own name show it once. */
@@ -216,8 +219,9 @@ function distinct(parts: string[]): string[] {
   return [...new Set(parts.filter(Boolean))];
 }
 
-function chipOf(tool: ToolEntry) {
-  return CHIPS[categoryOf(tool)];
+function chipOf(tool: ToolEntry): ChipCategory | undefined {
+  const category = categoryOf(tool);
+  return category in CHIP_COLORS ? (category as ChipCategory) : undefined;
 }
 
 /** A plan shows its text below instead of the adapter's title. */
@@ -239,8 +243,8 @@ function infoOf(tool: ToolEntry, all: ToolEntry[]): string {
 
 const INFO: Partial<Record<Category, (tool: ToolEntry, all: ToolEntry[]) => string>> = {
   plan: (tool) => (tool.status === "completed" ? `✓ ${copy.planApproved}` : ""),
-  read: (tool) => (producedOutput(tool) ? copy.lineCount(lineCount(tool.output)) : ""),
-  search: (tool) => (producedOutput(tool) ? copy.resultCount(lineCount(tool.output)) : ""),
+  read: (tool) => (producedOutput(tool) ? copy.lineCount(tool.outputLines) : ""),
+  search: (tool) => (producedOutput(tool) ? copy.resultCount(tool.outputLines) : ""),
   subagent: (tool, all) => copy.toolCount(childrenOf(tool, all).length),
 };
 
@@ -285,14 +289,13 @@ const DETAILS: Record<DetailKind, (tool: ToolEntry, branch: Branch) => string[]>
   subagent: (tool, branch) => (branch.expanded ? subagentLines(tool, branch) : []),
   plan: (tool, branch) => planLines(tool.plan ?? "", branch.paint),
   change: (tool, branch) => changeLines(tool, branch),
-  output: (tool, branch) => outputLines(tool.output, outputLimit(tool, branch.expanded), branch.paint),
+  output: (tool, branch) => outputLines(tool, outputLimit(tool, branch.expanded), branch.paint),
 };
 
 function planLines(plan: string, paint: Painter): string[] {
   const lines = splitLines(plan);
   const shown = lines.slice(0, MAX_PLAN_LINES).map((line) => paint.fg("text", clip(line)));
-  const hidden = lines.length - shown.length;
-  return hidden > 0 ? [...shown, paint.fg("dim", copy.hiddenLines(hidden))] : shown;
+  return withHidden(shown, lines.length - shown.length, paint);
 }
 
 function changeLines(tool: ToolEntry, branch: Branch): string[] {
@@ -300,8 +303,7 @@ function changeLines(tool: ToolEntry, branch: Branch): string[] {
   const limit = changeLimit(tool, branch.expanded);
   if (limit === 0) return [];
   const shown = change.lines.slice(0, limit).map((line) => paintDiffLine(line, branch.paint));
-  const hidden = change.lines.length - shown.length + change.hidden;
-  return hidden > 0 ? [...shown, branch.paint.fg("dim", copy.hiddenLines(hidden))] : shown;
+  return withHidden(shown, change.lines.length - shown.length + change.hidden, branch.paint);
 }
 
 /** An edit shows its diff even contracted; a new file shows its content only expanded. */
@@ -322,10 +324,6 @@ function subagentLines(tool: ToolEntry, branch: Branch): string[] {
   return [...branches(children, branch), ...text];
 }
 
-function childrenOf(tool: ToolEntry, all: ToolEntry[]): ToolEntry[] {
-  return all.filter((candidate) => candidate.parentId === tool.id);
-}
-
 function outputLimit(tool: ToolEntry, expanded: boolean): number {
   if (expanded) return EXPANDED_LINES;
   return showsOutputContracted(tool) ? COLLAPSED_LINES : 0;
@@ -336,11 +334,16 @@ function showsOutputContracted(tool: ToolEntry): boolean {
   return tool.status === "failed" || categoryOf(tool) === "command";
 }
 
-function outputLines(output: string, limit: number, paint: Painter): string[] {
+function outputLines(tool: ToolEntry, limit: number, paint: Painter): string[] {
   if (limit === 0) return [];
-  const lines = splitLines(output);
-  const shown = lines.slice(0, limit).map((line) => paint.fg("toolOutput", clip(line)));
-  const hidden = lines.length - shown.length;
+  const shown = splitLines(tool.output)
+    .slice(0, limit)
+    .map((line) => paint.fg("toolOutput", clip(line)));
+  return withHidden(shown, tool.outputLines - shown.length, paint);
+}
+
+/** `shown`, then how many lines it leaves out. */
+function withHidden(shown: string[], hidden: number, paint: Painter): string[] {
   return hidden > 0 ? [...shown, paint.fg("dim", copy.hiddenLines(hidden))] : shown;
 }
 
@@ -354,8 +357,4 @@ function clip(line: string): string {
 
 function clipTo(line: string, max: number): string {
   return line.length > max ? `${line.slice(0, max)}…` : line;
-}
-
-function lineCount(text: string): number {
-  return splitLines(text).length;
 }

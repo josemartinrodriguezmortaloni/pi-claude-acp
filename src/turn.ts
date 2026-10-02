@@ -195,11 +195,16 @@ export class TurnRegistry {
     if (turn.key !== undefined && this.#turns.get(turn.key) === turn) this.#turns.delete(turn.key);
   }
 
-  /** Cancels and forgets the live turn of `key`: Pi ended its agent loop without finishing it. */
+  /** Cancels and forgets the live turn of `key` and the activities no tool call will read. */
   discard(key: string): void {
     const turn = this.#turns.get(key);
     turn?.cancel();
     this.#turns.delete(key);
+    this.#dropActivities(turn);
+  }
+
+  #dropActivities(turn: LiveTurn | undefined): void {
+    for (const [id, entry] of this.#activities) if (entry.turn === turn) this.#activities.delete(id);
   }
 
   addActivity(activity: Activity, turn: LiveTurn): void {

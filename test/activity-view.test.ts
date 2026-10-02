@@ -18,8 +18,11 @@ const tagged: Painter = {
   italic: (text) => text,
 };
 
+/** `outputLines` counts the lines of `output`, as the tool book records it for short output. */
 function tool(fields: Partial<ToolEntry> & Pick<ToolEntry, "id" | "name">): ToolEntry {
-  return { kind: "other", target: "", status: "completed", output: "", ...fields };
+  const output = fields.output ?? "";
+  const outputLines = output === "" ? 0 : output.split("\n").length;
+  return { kind: "other", target: "", status: "completed", output, outputLines, ...fields };
 }
 
 const read = tool({ id: "r", name: "Read", kind: "read", target: "src/x.ts", output: "a\nb\nc" });
@@ -42,8 +45,8 @@ describe("activityLines", () => {
     const write = tool({ id: "w", name: "Write", kind: "edit", target: "src/new.ts" });
     expect(activityLines({ tools: [read, edit, write] }, false, plain).slice(1)).toEqual([
       "├ Read src/x.ts · 3 líneas",
-      "├ [EDIT] src/x.ts",
-      "└ [CREATE] src/new.ts",
+      "├ [EDITA] src/x.ts",
+      "└ [CREA] src/new.ts",
     ]);
   });
 
@@ -88,7 +91,8 @@ describe("activityLines", () => {
   });
 
   it("hides what a read returned until the detail is expanded, then shows up to 20 lines", () => {
-    const long = { ...read, output: lines(25) };
+    // The tool book keeps the first 20 lines of a 25-line output (burst.ts).
+    const long = { ...read, output: lines(20), outputLines: 25 };
     expect(activityLines({ tools: [long] }, false, plain)).toHaveLength(2);
     const expanded = activityLines({ tools: [long] }, true, plain);
     expect(expanded).toHaveLength(2 + 20 + 1);
@@ -117,7 +121,7 @@ describe("activityLines", () => {
     const details = { tools: [task, child] };
     expect(activityLines(details, false, plain)).toEqual([
       "● 1 herramienta · 1 subagente",
-      "└ [TASK] buscar tests · 1 herramienta",
+      "└ [AGENTE] buscar tests · 1 herramienta",
     ]);
     expect(activityLines(details, true, plain).slice(2)).toEqual([
       "   └ Read src/x.ts · 3 líneas",
@@ -144,7 +148,7 @@ describe("activityLines", () => {
     const edit = tool({ id: "e", name: "Edit", kind: "edit", target: "a.ts", change });
     const shown = activityLines({ tools: [edit] }, false, plain);
     expect(shown[0]).toBe("● 1 herramienta · 1 edición · +1 −1");
-    expect(shown[1]).toBe("└ [EDIT] a.ts +1 −1");
+    expect(shown[1]).toBe("└ [EDITA] a.ts +1 −1");
     expect(shown.slice(2, 5)).toEqual(["    1 a", "   -2 b", "   +2 B"]);
     expect(shown).toHaveLength(2 + 12 + 1);
     expect(shown.at(-1)).toBe("   … (+3 líneas)");
@@ -163,14 +167,14 @@ describe("activityLines", () => {
   it("keeps a new file contracted to one line and shows its content when expanded", () => {
     const change = { lines: ["+1 x", "+2 y"], hidden: 0, added: 2, removed: 0, created: true };
     const write = tool({ id: "w", name: "Write", kind: "edit", target: "n.ts", change });
-    expect(activityLines({ tools: [write] }, false, plain).slice(1)).toEqual(["└ [CREATE] n.ts +2"]);
+    expect(activityLines({ tools: [write] }, false, plain).slice(1)).toEqual(["└ [CREA] n.ts +2"]);
     expect(activityLines({ tools: [write] }, true, plain).slice(2)).toEqual(["   +1 x", "   +2 y"]);
   });
 
   it("shows a Write over an existing file as an edit", () => {
     const change = { lines: ["-1 x", "+1 y"], hidden: 0, added: 1, removed: 1, created: false };
     const write = tool({ id: "w", name: "Write", kind: "edit", target: "a.ts", change });
-    expect(activityLines({ tools: [write] }, false, plain)[1]).toBe("└ [EDIT] a.ts +1 −1");
+    expect(activityLines({ tools: [write] }, false, plain)[1]).toBe("└ [EDITA] a.ts +1 −1");
   });
 
   it("shows the error of a failed edit instead of the change it asked for", () => {

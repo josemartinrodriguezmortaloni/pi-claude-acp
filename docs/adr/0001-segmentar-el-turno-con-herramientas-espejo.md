@@ -12,4 +12,4 @@ Pi solo permite expandir y contraer componentes de herramienta, de mensaje custo
 
 - El provider pasa a ser una máquina de estados que abarca varias llamadas a `streamSimple`. Una llamada cuyo último mensaje es un `toolResult` continúa el turno abierto y no envía prompt.
 - Las herramientas espejo no pueden usar los nombres de las herramientas nativas de Pi (`read`, `edit`, `bash`, `write`). Con esos nombres, Pi ejecutaría la herramienta real otra vez.
-- Las herramientas espejo solo están activas mientras el modelo activo es de `claude-acp`.
+- La herramienta espejo queda activa siempre, porque Pi solo ejecuta herramientas activas, pero su declaración nunca llega a un modelo (`prepareLoadout` la oculta). Solo el provider `claude-acp` la llama.

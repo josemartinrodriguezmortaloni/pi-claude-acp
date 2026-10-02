@@ -38,6 +38,11 @@ describe("progressLines", () => {
     ]);
   });
 
+  it("prints a row the agent wrote without its terminal escape sequences", () => {
+    const row = { text: "Leer\u001b]52;c;aGk=\u0007 \u001b[2Jx", state: "active" as const };
+    expect(progressLines("Plan", [row], false, plain)[1]).toBe("│ ● Leer x");
+  });
+
   it("shows every row when the detail is expanded", () => {
     expect(
       progressLines("Plan", items(["active", "pending", "pending", "pending", "pending"]), true, plain),
@@ -66,6 +71,7 @@ describe("subagentItems", () => {
     target: "",
     status: "completed",
     output: "",
+    outputLines: 0,
     ...fields,
   });
 

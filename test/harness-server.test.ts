@@ -89,6 +89,27 @@ describe("HarnessServer", () => {
     expect(result).toEqual({ content: [{ type: "text", text: "ran eval" }] });
   });
 
+  it("refuses a tool its Pi session was not offered, such as Pi's own bash, without calling Pi", async () => {
+    const calls: [string, string, Record<string, unknown>][] = [];
+    const server = harnessServer(calls);
+    server.setTools("pi-1", [EVAL]);
+    const { client } = await connect(await server.describe("pi-1"));
+    const result = await client.callTool({ name: "bash", arguments: { command: "id" } });
+    expect(result).toEqual({
+      content: [{ type: "text", text: "The tool bash is not offered in this Pi session." }],
+      isError: true,
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it("revokes every token when it closes", async () => {
+    const server = harnessServer();
+    server.setTools("pi-1", [EVAL]);
+    const description = await server.describe("pi-1");
+    await server.close();
+    await expect(connect(description)).rejects.toThrow();
+  });
+
   it("gives each Pi session only its own tools", async () => {
     const server = harnessServer();
     server.setTools("pi-1", [EVAL]);

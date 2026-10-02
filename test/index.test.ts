@@ -155,17 +155,25 @@ describe("registerClaudeAcp", () => {
     const model = { ...provider?.models?.[0], provider: "claude-acp", api: "claude-acp" } as never;
     const offered: string[] = [];
     const answers: unknown[] = [];
-    // The agent connects to the harness server it got in session/new, as Claude Code does.
+    let refused: unknown;
+    // The agent connects to the harness server it got in session/new, as Claude Code does: it expands
+    // `${VAR}` in the headers from the environment the session options give it.
     conn.onPrompt = async () => {
-      const servers = (conn.callsOf("newSession").at(-1)?.mcpServers ?? []) as HttpMcpServer[];
+      const params = conn.callsOf("newSession").at(-1);
+      const meta = params?._meta as { claudeCode: { options: { env: Record<string, string> } } };
+      const env = meta.claudeCode.options.env;
+      const servers = (params?.mcpServers ?? []) as HttpMcpServer[];
       const server = servers.find((entry) => entry.name === "pi");
       if (!server) throw new Error("no harness server");
-      const headers = Object.fromEntries(server.headers.map((header) => [header.name, header.value]));
+      const expand = (value: string) =>
+        value.replace(/\$\{(\w+)\}/g, (_match, name: string) => env[name] ?? "");
+      const headers = Object.fromEntries(server.headers.map((header) => [header.name, expand(header.value)]));
       const client = new Client({ name: "claude-code", version: "1.0.0" });
       await client.connect(
         new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers } }),
       );
       offered.push(...(await client.listTools()).tools.map((tool) => tool.name));
+      refused = await client.callTool({ name: "read", arguments: { path: "/etc/passwd" } });
       answers.push(await client.callTool({ name: "eval", arguments: { code: "2 + 2" } }));
       await client.close();
       return { stopReason: "end_turn" };
@@ -203,6 +211,11 @@ describe("registerClaudeAcp", () => {
       ?.result();
     expect(second?.stopReason).toBe("stop");
     expect(offered).toEqual(["eval"]);
+    // Pi's own read runs by name: a call to it never reaches Pi.
+    expect(refused).toEqual({
+      content: [{ type: "text", text: "The tool read is not offered in this Pi session." }],
+      isError: true,
+    });
     expect(answers).toEqual([{ content: [{ type: "text", text: "4" }], isError: false }]);
     handlers.get("session_shutdown")?.({ reason: "quit" }, ctx);
   });

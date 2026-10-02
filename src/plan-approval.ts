@@ -4,6 +4,7 @@ import type {
   RequestPermissionResponse,
 } from "@agentclientprotocol/sdk";
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { toolNameOf } from "./claude-code-meta.ts";
 import { oneAtATime } from "./dialogs.ts";
 import { copy } from "./messages.ts";
 
@@ -26,7 +27,7 @@ type Choice = "edits" | "manual" | "keep";
 
 /** The request the agent makes to leave plan mode and start working. */
 export function isPlanApproval(request: RequestPermissionRequest): boolean {
-  return Object(Object(request.toolCall._meta).claudeCode).toolName === "ExitPlanMode";
+  return toolNameOf(request.toolCall) === "ExitPlanMode";
 }
 
 /**
@@ -76,12 +77,16 @@ const ANSWERS: Record<
   keep: (options) => options.find((option) => option.kind === "reject_once"),
 };
 
+/** A cancelled turn answers "cancelled", whatever the dialog returned. */
 function answer(
   request: RequestPermissionRequest,
   choice: Choice,
   ctx: PlanContext,
 ): RequestPermissionResponse {
-  const option = ANSWERS[choice](request.options, ctx);
+  return responseFor(ctx.signal?.aborted ? undefined : ANSWERS[choice](request.options, ctx));
+}
+
+function responseFor(option: PermissionOption | undefined): RequestPermissionResponse {
   return option
     ? { outcome: { outcome: "selected", optionId: option.optionId } }
     : { outcome: { outcome: "cancelled" } };

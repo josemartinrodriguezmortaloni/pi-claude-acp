@@ -1,10 +1,12 @@
-import { chmod, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   type AcpConnection,
+  agentEnv,
+  createLog,
   openConnection,
   resolveExecutable,
   SessionRouter,
@@ -105,8 +107,51 @@ describe("resolveExecutable", () => {
     await expect(resolveExecutable({ PATH: `/nonexistent:${dir}` })).resolves.toBe(exe);
   });
 
+  it("skips relative PATH entries, which resolve in a working directory a repo controls", async () => {
+    const exe = await script("claude", "true");
+    const dir = relative(process.cwd(), dirname(exe));
+    await expect(resolveExecutable({ PATH: dir })).rejects.toThrow("claude");
+  });
+
   it("fails when claude is not on the PATH", async () => {
     await expect(resolveExecutable({ PATH: "/nonexistent" })).rejects.toThrow("claude");
+  });
+});
+
+describe("agentEnv", () => {
+  it("keeps Pi's Anthropic keys from the agent, so Claude Code uses the account the user logged in with", () => {
+    expect(agentEnv({ ANTHROPIC_API_KEY: "sk", ANTHROPIC_AUTH_TOKEN: "t", HOME: "/h" })).toEqual({
+      HOME: "/h",
+    });
+  });
+});
+
+describe("createLog", () => {
+  const settled = () => new Promise((resolve) => setTimeout(resolve, 100));
+
+  it("writes a log only its owner can read, in a directory only its owner can enter", async () => {
+    const file = join(await mkdtemp(join(tmpdir(), "claude-acp-")), "logs", "adapter.log");
+    createLog(file)("línea");
+    await settled();
+    expect((await stat(file)).mode & 0o777).toBe(0o600);
+    expect((await stat(dirname(file))).mode & 0o777).toBe(0o700);
+  });
+
+  it("tightens a log written before with wider permissions", async () => {
+    const file = join(await mkdtemp(join(tmpdir(), "claude-acp-")), "adapter.log");
+    await writeFile(file, "vieja\n", { mode: 0o644 });
+    createLog(file)("nueva");
+    await settled();
+    expect((await stat(file)).mode & 0o777).toBe(0o600);
+  });
+
+  it("moves a log past 1 MiB to adapter.log.1 and starts a new one", async () => {
+    const file = join(await mkdtemp(join(tmpdir(), "claude-acp-")), "adapter.log");
+    await writeFile(file, "x".repeat(1024 * 1024 + 1));
+    createLog(file)("nueva");
+    await settled();
+    expect((await stat(`${file}.1`)).size).toBe(1024 * 1024 + 1);
+    expect(await readFile(file, "utf8")).toMatch(/ nueva\n$/);
   });
 });
 

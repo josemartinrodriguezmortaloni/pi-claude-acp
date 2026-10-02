@@ -56,6 +56,7 @@ In Pi, it reads as if you talk to the model directly: the transcript, the dialog
 ## Highlights
 
 - **Your binary, your login:** only the `claude` binary talks to Anthropic; the extension never reads, stores or logs tokens
+- **No secrets on a command line:** MCP header and env values, and the harness token, reach Claude Code through its environment, which only you can read
 - **Pi approves the tool calls:** a `PreToolUse` hook sends each tool call to Pi validator plugins, the session mode and the Pi dialog; in auto mode, Claude Code's classifier approves first
 - **Pi's tools for the agent:** tools of Pi extensions, such as `eval` and `codemode`, reach Claude Code through a loopback MCP server, and Pi runs them as its own tool calls
 - **Collapsible activity:** each burst of tools is one tree entry with the diff of every edit; `Ctrl+O` expands all of them
@@ -124,10 +125,11 @@ The extension has no settings file. It reads these sources:
 | Source                                           | Use                                                                                                          |
 | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
 | `CLAUDE_CODE_EXECUTABLE`                         | Path to the `claude` binary. Without it, the extension looks up `claude` on the `PATH`                        |
-| `~/.pi/agent/mcp.json`                           | MCP servers passed to each Claude Code session; servers with `"enabled": false` are skipped                   |
+| `~/.pi/agent/mcp.json`                           | MCP servers passed to each Claude Code session; servers with `"enabled": false` are skipped. Header and env values go to the Claude Code environment as `${PI_MCP_<n>}`, never to its command line |
 | `~/.pi/agent/AGENTS.md`, `./AGENTS.md`, Pi skills | Sent as a `<pi-context>` block before the first prompt of each Claude Code session                            |
 | `LC_ALL`, `LC_MESSAGES`, `LANG`                  | Language of every text the extension shows, in that order. Without a catalog for it, English                  |
-| `~/.pi/agent/claude-acp/adapter.log`             | Output, not input: adapter stderr, and every permission request with its answer                              |
+| `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`      | Removed from the agent's environment, so Claude Code uses your Claude login and never bills Pi's key          |
+| `~/.pi/agent/claude-acp/adapter.log`             | Output, not input: adapter stderr, and every permission request (tool name and id, never the command) with its answer. Mode `0600`; past 1 MiB it moves to `adapter.log.1` |
 
 The extension checks the binary before it starts the adapter: the first line of `claude --version` must be `<x.y.z> (Claude Code)`. A wrapper that prints anything else fails with the tested path and its output. For example, the mise shim prints install progress, so point the variable at the real binary:
 
@@ -244,11 +246,11 @@ sequenceDiagram
 | All validators vote `allow`             | Approve                                                                |
 | The session mode approves it ([Modes](#modes)) | Approve                                                          |
 | A validator votes `ask`, or none votes  | Pi dialog. Without a Pi UI, reject                                     |
-| `ExitPlanMode`                          | The plan dialog ([Plans](#plans)); validators are not asked            |
+| `ExitPlanMode`                          | A validator `deny` rejects it; else the plan dialog ([Plans](#plans)). An `allow` does not approve it |
 | Auto mode, and the classifier approves  | Runs without reaching Pi                                               |
 | The turn is cancelled                   | `cancelled`                                                            |
 
-The dialog title names the tool and what it acts on, as in `Bash · rm -rf dist`. While the dialog is open, the tool's branch reads `? awaiting approval`. The dialog hides the "always allow" options: with the `ask` hook, Claude Code ignores the rule they write. Pi keeps one dialog at a time, so parallel tool calls wait in a queue instead of replacing each other.
+The dialog title names the tool and what it acts on, as in `Bash · rm -rf dist`. A tool with no command or path shows its whole input, one line per field, such as the code `mcp__pi__eval` runs; nothing is cut. Terminal escape sequences are removed from the title, so a command cannot hide part of itself. While the dialog is open, the tool's branch reads `? awaiting approval`. The dialog hides the "always allow" options: with the `ask` hook, Claude Code ignores the rule they write. Pi keeps one dialog at a time, so parallel tool calls wait in a queue instead of replacing each other.
 
 A validator is a Pi extension that listens on `pi.events` and calls `vote` synchronously in its handler:
 
@@ -281,7 +283,7 @@ The mode sets what Claude Code may do without a dialog. `alt+m` moves to the nex
 | Plan              | `◇ plan mode`           | The plan file Claude Code writes in `~/.claude/plans`                  |
 | Auto              | `⏵⏵⏵ auto mode`         | Whatever Claude Code's classifier judges safe                          |
 
-Validators vote before the mode: a `deny` still wins. A `claude-acp-mode` entry saves each change, so a resumed session keeps its mode and a new one starts in Manual. When Claude Code changes its own mode, for example when it enters plan mode, the footer follows.
+Validators vote before the mode: a `deny` still wins. Auto-accept edits compares real paths, so an edit through a symlink that leaves the working directory asks. A `claude-acp-mode` entry saves each change, so a resumed session keeps its mode and a new one starts in Manual. When Claude Code changes its own mode, for example when it enters plan mode, the footer follows.
 
 Auto works differently. The `ask` hook steps aside when `permission_mode` is `auto`, and Claude Code's classifier decides. Only the tool calls it escalates reach Pi, so validators and dialogs never see the rest: in a test it ran `git push --force` and `rm -rf ~/…` without asking. The footer shows Auto in red for that reason. A model without Auto falls back to auto-accept edits, and the footer follows. Bypass is not offered: it skips everything.
 
@@ -309,7 +311,7 @@ Two widgets above the editor show work in progress: Claude Code's plan, and the 
 
 ### Harness tools
 
-Claude Code has its own Read, Edit, Write, Bash, Grep and Glob, but Pi extensions register tools it lacks, such as `eval` and `codemode`. The extension serves these harness tools on an MCP server at `127.0.0.1`, with one bearer token per Pi session, and passes it to each Claude Code session as `pi`. Claude Code sees every active Pi tool except Pi's `read`, `edit`, `write`, `bash`, `grep`, `find` and `ls`.
+Claude Code has its own Read, Edit, Write, Bash, Grep and Glob, but Pi extensions register tools it lacks, such as `eval` and `codemode`. The extension serves these harness tools on an MCP server at `127.0.0.1`, with one bearer token per Pi session, and passes it to each Claude Code session as `pi`. Claude Code sees every active Pi tool except Pi's `read`, `edit`, `write`, `bash`, `grep`, `find` and `ls`, and the server refuses a call to any tool it did not offer. The token travels in the environment of the Claude Code process, not on its command line, and dies with the Pi session.
 
 When Claude Code calls `mcp__pi__eval`, the call goes through the mode like any other tool. Then the provider ends the Pi message with a real `eval` tool call. Pi runs it with its own renderer and hooks, and the result goes back to Claude Code when Pi reports `tool_execution_end`. Tools of the burst that still run continue in a new activity entry after the harness tool. See [ADR 0002](docs/adr/0002-herramientas-del-harness-por-ida-y-vuelta.md).
 
@@ -337,15 +339,15 @@ Text stays text. Everything else Claude Code does is an entry of `agent_activity
 | Tool calls in a row                     | One burst entry: a summary line, then one branch per tool              |
 | `Edit`, `Write` over a file             | `EDIT` chip and the diff, numbered from its place in the file: 12 lines, 80 expanded |
 | `Write` of a new file                   | `CREATE` chip and one line; the content when expanded                  |
-| `Bash`                                  | `BASH` chip and the first 5 lines of output, 20 expanded               |
+| `Bash`                                  | `BASH` chip and the first 5 lines of output, 20 expanded. The session file keeps those 20 lines and the count |
 | Reads, searches, fetches                | One muted line with what they found; the output when expanded          |
-| A subagent's tools                      | Under its `TASK` branch, shown when expanded                           |
+| A subagent's tools                      | Under its `AGENT` branch, shown when expanded                          |
 | A failed tool                           | `FAILED` chip and its output, always                                   |
 | `plan`                                  | Widget above the editor                                                |
 | `usage_update`                          | Turn cost and the model's context window                               |
 | `compaction_update`                     | The next prompt carries the context block again                        |
 
-Only tools that change something carry a chip. Each state has its own mark, so the transcript reads without color: `…` running, `? awaiting approval`, `✗ rejected`, `■ interrupted`.
+Only tools that change something carry a chip. Each state has its own mark, so the transcript reads without color: `…` running, `? awaiting approval`, `✗ rejected`, `■ interrupted`. Text from tools, subagents and the model shows without terminal escape sequences: a file the agent reads cannot write your clipboard or redraw the screen.
 
 ![A burst with a read, an edit and its diff, and a command](docs/screenshots/activity.png)
 
@@ -391,7 +393,14 @@ Each module owns one reason to change. `index.ts` only registers the provider an
 | Module           | Owns                                                                  | Changes when                         |
 | ---------------- | --------------------------------------------------------------------- | ------------------------------------ |
 | `connection.ts`  | Binary check, adapter process, ACP handshake, routing by session      | The ACP SDK changes                  |
-| `sessions.ts`    | Pi session ↔ ACP session, session options, context block, MCP servers | Pi session semantics change          |
+| `sessions.ts`    | Pi session ↔ ACP session, session options                             | Pi session semantics change          |
+| `mcp-config.ts`  | The MCP servers of `mcp.json`, and their values moved to the environment | How Claude Code receives MCP servers changes |
+| `context-block.ts` | The `<pi-context>` block: AGENTS.md files and skills                | What Pi context the agent gets changes |
+| `terminal-text.ts` | Text safe to print: no escape sequences or control characters      | What a terminal runs changes         |
+| `claude-code-meta.ts` | The adapter's `_meta.claudeCode` fields                          | The adapter's meta format changes    |
+| `turn-permissions.ts` | A permission request of a turn: the tool's state and the log     | The permission flow of a turn changes |
+| `usage.ts`       | ACP usage → Pi usage, summed across ACP turns                         | The usage format changes             |
+| `files.ts`       | Reading a file that may not exist                                     | How optional files are read changes  |
 | `catalog.ts`     | `configOptions` → Pi models and thinking levels                       | The adapter's model format changes   |
 | `stream.ts`      | `session/update` → Pi message events, one segment per Pi message      | The Pi or ACP stream contract changes |
 | `turn.ts`        | The live ACP turn across Pi messages, its event queue and activities  | The segmentation contract changes    |

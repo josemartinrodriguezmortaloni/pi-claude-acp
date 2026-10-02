@@ -9,6 +9,7 @@ import type {
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { oneAtATime } from "./dialogs.ts";
 import { copy } from "./messages.ts";
+import { printable } from "./terminal-text.ts";
 
 /** claude-agent-acp pairs each AskUserQuestion question with a free-text `<key>_custom` field (elicitation.js:131). */
 const CUSTOM_SUFFIX = "_custom";
@@ -71,9 +72,10 @@ function fields(message: string, schema: ElicitationSchema): Field[] {
     }));
 }
 
+/** The agent or an MCP server writes every text of the form. */
 function fieldTitle(message: string, property: ElicitationPropertySchema): string {
   const { title, description } = property as { title?: string | null; description?: string | null };
-  return [title, description || message].filter(Boolean).join(" · ");
+  return printable([title, description || message].filter(Boolean).join(" · "));
 }
 
 async function fillForm(
@@ -118,7 +120,9 @@ const ASK: Record<Kind, Ask> = {
 function choices(property: ElicitationPropertySchema): Choice[] {
   const source = (property as { items?: unknown }).items ?? property;
   const titled = enumOptions(source).map((option) => ({ value: option.const, label: optionLabel(option) }));
-  return titled.length > 0 ? titled : plainValues(source).map((value) => ({ value, label: value }));
+  return titled.length > 0
+    ? titled
+    : plainValues(source).map((value) => ({ value, label: printable(value) }));
 }
 
 function enumOptions(source: unknown): EnumOption[] {
@@ -131,7 +135,7 @@ function plainValues(source: unknown): string[] {
 }
 
 function optionLabel(option: EnumOption): string {
-  return option.description ? `${option.title} — ${option.description}` : option.title;
+  return printable(option.description ? `${option.title} — ${option.description}` : option.title);
 }
 
 async function askSelect(

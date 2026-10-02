@@ -1,3 +1,5 @@
+import type { ModeId } from "./modes.ts";
+
 /**
  * Every text the extension shows to the user, in the user's language. Pi has no i18n of its own,
  * so the language comes from the system locale. Logs stay out of here: they are for debugging.
@@ -7,8 +9,11 @@ export type Locale = "en" | "es";
 /** What a tool of a burst does, as the summary line counts it. */
 export type ToolCategory = "read" | "search" | "edit" | "create" | "command" | "fetch" | "subagent" | "plan";
 
-/** The modes of src/modes.ts, as the footer names them. U+FE0E keeps ⏸ a text glyph, not an emoji. */
-type ModeLabels = Record<"default" | "acceptEdits" | "plan" | "auto", string>;
+/** The modes as the footer names them. U+FE0E keeps ⏸ a text glyph, not an emoji. */
+type ModeLabels = Record<ModeId, string>;
+
+/** The categories whose tools carry a chip: they change the repo or run something (PRODUCT.md, principle 2). */
+export type ChipCategory = Extract<ToolCategory, "plan" | "edit" | "create" | "command" | "subagent">;
 
 export interface Messages {
   providerName: string;
@@ -51,6 +56,7 @@ export interface Messages {
   resultCount(count: number): string;
   inScope(scope: string): string;
   failedChip: string;
+  chipLabel: Record<ChipCategory, string>;
   awaitingApproval: string;
   rejected: string;
   interrupted: string;
@@ -106,10 +112,11 @@ const EN: Messages = {
   noPiSession: "claude-acp: there is no active Pi session.",
   mcpInvalidJson: (file) => `${file} is not valid JSON.`,
   mcpServerWithoutCommand: (name) => `The MCP server "${name}" has neither command nor url.`,
-  binaryNotFound: "`claude` is not on the PATH. Set CLAUDE_CODE_EXECUTABLE to the Claude Code binary.",
-  binaryNotExecutable: (exe) => `The Claude Code binary does not exist or is not executable: ${exe}`,
+  binaryNotFound:
+    "`claude` is not on the PATH. Set CLAUDE_CODE_EXECUTABLE to the path of the `claude` binary.",
+  binaryNotExecutable: (exe) => `The \`claude\` binary does not exist or is not executable: ${exe}`,
   notTheBinary: (exe, output) =>
-    `${exe} is not the Claude Code binary: \`--version\` printed ${JSON.stringify(output)}. ` +
+    `${exe} is not the \`claude\` binary: \`--version\` printed ${JSON.stringify(output)}. ` +
     "Point CLAUDE_CODE_EXECUTABLE to the real binary, not to a wrapper.",
   adapterNoResponse: (detail) => `The ACP adapter did not respond: ${detail}`,
   adapterExited: (code, signal) =>
@@ -132,6 +139,7 @@ const EN: Messages = {
   resultCount: (count) => `${count} ${plural(count, "result", "results")}`,
   inScope: (scope) => `in ${scope}`,
   failedChip: "FAILED",
+  chipLabel: { plan: "PLAN", edit: "EDIT", create: "CREATE", command: "BASH", subagent: "AGENT" },
   awaitingApproval: "awaiting approval",
   rejected: "rejected",
   interrupted: "interrupted",
@@ -143,8 +151,8 @@ const EN: Messages = {
     plan: "◇ plan mode",
     auto: "⏵⏵⏵ auto mode",
   },
-  modeCommandDescription: "Switch the permission mode: manual, edits, plan or auto",
-  modeChoose: "Permission mode",
+  modeCommandDescription: "Switch the mode: manual, edits, plan or auto",
+  modeChoose: "Mode",
   modeUnknown: (value) => `Unknown mode: ${value}. Use manual, edits, plan or auto.`,
   planQuestion: "Would you like to proceed?",
   planAcceptEdits: "Yes, and auto-accept edits",
@@ -186,10 +194,10 @@ const ES: Messages = {
   mcpInvalidJson: (file) => `${file} no es JSON válido.`,
   mcpServerWithoutCommand: (name) => `El servidor MCP "${name}" no tiene command ni url.`,
   binaryNotFound:
-    "No se encontró `claude` en el PATH. Definí CLAUDE_CODE_EXECUTABLE con la ruta del binario de Claude Code.",
-  binaryNotExecutable: (exe) => `El binario de Claude Code no existe o no es ejecutable: ${exe}`,
+    "No se encontró `claude` en el PATH. Definí CLAUDE_CODE_EXECUTABLE con la ruta del binario `claude`.",
+  binaryNotExecutable: (exe) => `El binario \`claude\` no existe o no es ejecutable: ${exe}`,
   notTheBinary: (exe, output) =>
-    `${exe} no es el binario de Claude Code: \`--version\` devolvió ${JSON.stringify(output)}. ` +
+    `${exe} no es el binario \`claude\`: \`--version\` devolvió ${JSON.stringify(output)}. ` +
     "Apuntá CLAUDE_CODE_EXECUTABLE al binario real, no a un wrapper.",
   adapterNoResponse: (detail) => `El adaptador ACP no respondió: ${detail}`,
   adapterExited: (code, signal) =>
@@ -212,6 +220,7 @@ const ES: Messages = {
   resultCount: (count) => `${count} ${plural(count, "resultado", "resultados")}`,
   inScope: (scope) => `en ${scope}`,
   failedChip: "FALLÓ",
+  chipLabel: { plan: "PLAN", edit: "EDITA", create: "CREA", command: "BASH", subagent: "AGENTE" },
   awaitingApproval: "esperando aprobación",
   rejected: "rechazada",
   interrupted: "interrumpida",
@@ -223,11 +232,11 @@ const ES: Messages = {
     plan: "◇ modo plan",
     auto: "⏵⏵⏵ modo auto",
   },
-  modeCommandDescription: "Cambiá el modo de permisos: manual, edits, plan o auto",
-  modeChoose: "Modo de permisos",
+  modeCommandDescription: "Cambiá el modo: manual, edits, plan o auto",
+  modeChoose: "Modo",
   modeUnknown: (value) => `Modo desconocido: ${value}. Usá manual, edits, plan o auto.`,
   planQuestion: "¿Ejecutar este plan?",
-  planAcceptEdits: "Sí, y aceptar ediciones automáticas",
+  planAcceptEdits: "Sí, con ediciones automáticas",
   planManual: "Sí, aprobar ediciones a mano",
   planKeep: "No, seguir planificando",
   planFeedback: "¿Qué cambio en el plan?",
@@ -236,7 +245,7 @@ const ES: Messages = {
   moreRows: (count) => `… ${count} más, Ctrl+O para ver todo`,
 };
 
-const CATALOGS: Record<string, Messages> = { en: EN, es: ES };
+const CATALOGS: Record<Locale, Messages> = { en: EN, es: ES };
 
 /** The language of the first locale variable set, else of `intlLocale`. Languages without a catalog read English. */
 export function localeFrom(env: Partial<Record<string, string>>, intlLocale: string): Locale {
@@ -254,7 +263,7 @@ function catalogLocale(language: string): Locale {
 }
 
 export function messagesFor(locale: Locale): Messages {
-  return CATALOGS[locale] ?? EN;
+  return CATALOGS[locale];
 }
 
 /** The catalog for this process's locale. */

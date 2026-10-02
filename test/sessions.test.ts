@@ -1,7 +1,4 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { McpServer } from "@agentclientprotocol/sdk";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
@@ -10,27 +7,27 @@ import {
   type AcpSession,
   applyConfig,
   branchContains,
-  buildContextBlock,
-  loadMcpServers,
   openProbe,
   SESSION_ENTRY,
   SessionStore,
   sessionMeta,
-  shouldCancelCompaction,
-  skillsFromCommands,
+  usesClaudeAcp,
 } from "../src/sessions.ts";
 import { FakeConnection } from "./fake-connection.ts";
 
 const ASK = { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "ask" } };
 const MCP: McpServer[] = [{ name: "engram", command: "engram", args: ["mcp"], env: [] }];
 const anyBranch = () => true;
-/** The harness MCP server of one Pi session (src/harness-server.ts). */
-const harnessOf = (piSessionId: string): McpServer => ({
+/** The harness MCP server of one Pi session (src/harness-server.ts), with its header value as given. */
+const harnessOf = (piSessionId: string, value = `Bearer ${piSessionId}`): McpServer => ({
   type: "http",
   name: "pi",
   url: "http://127.0.0.1:1/mcp",
-  headers: [{ name: "authorization", value: `Bearer ${piSessionId}` }],
+  headers: [{ name: "authorization", value }],
 });
+/** The environment a session's Claude Code process gets (`_meta.claudeCode.options.env`). */
+const envOf = (params: { _meta?: unknown }) =>
+  (params._meta as { claudeCode: { options: { env: Record<string, string> } } }).claudeCode.options.env;
 
 function store() {
   const observed: unknown[] = [];
@@ -87,9 +84,18 @@ describe("SessionStore.ensure", () => {
     await s.ensure(conn, "pi-1", "/work", anyBranch);
     await s.ephemeral(conn, "/work");
     expect(conn.callsOf("newSession").map((params) => params.mcpServers)).toEqual([
-      [...MCP, harnessOf("pi-1")],
+      [...MCP, harnessOf("pi-1", `\${PI_MCP_0}`)],
       MCP,
     ]);
+  });
+
+  it("keeps header and env values off the command line: they go to the Claude Code environment", async () => {
+    const conn = new FakeConnection();
+    const { store: s } = store();
+    await s.ensure(conn, "pi-1", "/work", anyBranch);
+    const [params] = conn.callsOf("newSession");
+    expect(JSON.stringify(params?.mcpServers)).not.toContain("Bearer pi-1");
+    expect(envOf(params ?? {})).toEqual({ PI_MCP_0: "Bearer pi-1" });
   });
 
   it("C27: switches every created or resumed session to the default mode", async () => {
@@ -117,13 +123,13 @@ describe("SessionStore.ensure", () => {
     const conn = new FakeConnection();
     const { store: s } = store();
     s.load("pi-1", [recordEntry("acp-saved", "leaf-1")]);
-    const { session, notices } = await s.ensure(conn, "pi-1", "/work", anyBranch);
+    const { session, warnings } = await s.ensure(conn, "pi-1", "/work", anyBranch);
     expect(session.id).toBe("acp-saved");
-    expect(notices).toEqual([]);
+    expect(warnings).toEqual([]);
     expect(conn.callsOf("resumeSession")[0]).toMatchObject({
       sessionId: "acp-saved",
       cwd: "/work",
-      mcpServers: [...MCP, harnessOf("pi-1")],
+      mcpServers: [...MCP, harnessOf("pi-1", `\${PI_MCP_0}`)],
     });
     expect(conn.callsOf("newSession")).toEqual([]);
   });
@@ -145,19 +151,19 @@ describe("SessionStore.ensure", () => {
     conn.resumeFails = true;
     const { store: s } = store();
     s.load("pi-1", [recordEntry("acp-gone", null)]);
-    const { session, notices } = await s.ensure(conn, "pi-1", "/work", anyBranch);
+    const { session, warnings } = await s.ensure(conn, "pi-1", "/work", anyBranch);
     expect(session.id).not.toBe("acp-gone");
-    expect(notices).toEqual([copy.resumeFailed]);
+    expect(warnings).toEqual([copy.resumeFailed]);
   });
 
-  it("C7: opens a new session with a notice for a Pi fork, which copies the parent's record", async () => {
+  it("C7: opens a new session with a warning for a Pi fork, which copies the parent's record", async () => {
     const conn = new FakeConnection();
     const { store: s } = store();
     s.load("pi-fork", [recordEntry("acp-parent", null, "pi-parent")]);
-    const { session, notices } = await s.ensure(conn, "pi-fork", "/work", anyBranch);
+    const { session, warnings } = await s.ensure(conn, "pi-fork", "/work", anyBranch);
     expect(session.id).not.toBe("acp-parent");
     expect(conn.callsOf("resumeSession")).toEqual([]);
-    expect(notices).toEqual([copy.branchDiverged]);
+    expect(warnings).toEqual([copy.branchDiverged]);
   });
 
   it("ignores a persisted record without the expected shape", async () => {
@@ -177,13 +183,13 @@ describe("SessionStore.ensure", () => {
     expect(conn.callsOf("closeSession")).toEqual([{ sessionId: session.id }]);
   });
 
-  it("C7: opens a new session with a notice when the saved leaf is no longer on the branch", async () => {
+  it("C7: opens a new session with a warning when the saved leaf is no longer on the branch", async () => {
     const conn = new FakeConnection();
     const { store: s } = store();
     s.load("pi-1", [recordEntry("acp-saved", "leaf-old")]);
-    const { session, notices } = await s.ensure(conn, "pi-1", "/work", (leafId) => leafId !== "leaf-old");
+    const { session, warnings } = await s.ensure(conn, "pi-1", "/work", (leafId) => leafId !== "leaf-old");
     expect(session.id).not.toBe("acp-saved");
-    expect(notices).toEqual([copy.branchDiverged]);
+    expect(warnings).toEqual([copy.branchDiverged]);
     expect(conn.callsOf("resumeSession")).toEqual([]);
   });
 
@@ -350,75 +356,11 @@ describe("applyConfig failures", () => {
   });
 });
 
-describe("C29: shouldCancelCompaction", () => {
-  it("cancels Pi compaction for claude-acp models only", () => {
-    expect(shouldCancelCompaction({ provider: "claude-acp" })).toBe(true);
-    expect(shouldCancelCompaction({ provider: "anthropic" })).toBe(false);
-    expect(shouldCancelCompaction(undefined)).toBe(false);
-  });
-});
-
-describe("loadMcpServers", () => {
-  async function file(content: string): Promise<string> {
-    const path = join(await mkdtemp(join(tmpdir(), "claude-acp-")), "mcp.json");
-    await writeFile(path, content);
-    return path;
-  }
-
-  it("maps stdio and http servers from the Pi mcp.json and skips disabled ones", async () => {
-    const path = await file(
-      JSON.stringify({
-        mcpServers: {
-          engram: { command: "engram", args: ["mcp"], env: { A: "1" } },
-          docs: { url: "https://x.test/mcp", headers: { Authorization: "k" } },
-          off: { command: "off", enabled: false },
-        },
-      }),
-    );
-    expect(await loadMcpServers(path)).toEqual([
-      { name: "engram", command: "engram", args: ["mcp"], env: [{ name: "A", value: "1" }] },
-      {
-        type: "http",
-        name: "docs",
-        url: "https://x.test/mcp",
-        headers: [{ name: "Authorization", value: "k" }],
-      },
-    ]);
-  });
-
-  it("fails naming a server that has neither command nor url", async () => {
-    const path = await file(JSON.stringify({ mcpServers: { broken: { args: [] } } }));
-    await expect(loadMcpServers(path)).rejects.toThrow("broken");
-  });
-
-  it("returns no servers when the file does not exist", async () => {
-    await expect(loadMcpServers("/nonexistent/mcp.json")).resolves.toEqual([]);
-  });
-
-  it("fails with the path, never the file content, when the file is not valid JSON", async () => {
-    const path = await file('{"headers": {"Authorization": "secret-token"');
-    const error = (await loadMcpServers(path).catch((e: unknown) => e)) as Error;
-    expect(error?.message).toContain(path);
-    expect(error?.message).not.toContain("secret-token");
-  });
-});
-
-describe("buildContextBlock", () => {
-  it("joins the global and project AGENTS.md with the Pi skills list", () => {
-    const block = buildContextBlock({
-      globalAgents: "reglas globales",
-      projectAgents: "reglas del proyecto",
-      skills: [{ name: "tdd", description: "Test first", path: "/skills/tdd/SKILL.md" }],
-    });
-    expect(block).toContain("reglas globales");
-    expect(block).toContain("reglas del proyecto");
-    expect(block).toContain("tdd: Test first (/skills/tdd/SKILL.md)");
-  });
-
-  it("omits the sections that have no content", () => {
-    const block = buildContextBlock({ skills: [] });
-    expect(block).not.toContain("AGENTS.md");
-    expect(block).not.toContain("Skills");
+describe("C29: usesClaudeAcp", () => {
+  it("tells claude-acp models apart, so Pi compaction is cancelled for them only", () => {
+    expect(usesClaudeAcp({ provider: "claude-acp" })).toBe(true);
+    expect(usesClaudeAcp({ provider: "anthropic" })).toBe(false);
+    expect(usesClaudeAcp(undefined)).toBe(false);
   });
 });
 
@@ -435,23 +377,6 @@ describe("openProbe", () => {
   });
 });
 
-describe("skillsFromCommands", () => {
-  it("lists the Pi skills with their SKILL.md path", () => {
-    const source = { source: "local", scope: "user", origin: "top-level" } as const;
-    expect(
-      skillsFromCommands([
-        {
-          name: "skill:tdd",
-          description: "Test first",
-          source: "skill",
-          sourceInfo: { ...source, path: "/s/SKILL.md" },
-        },
-        { name: "review", source: "prompt", sourceInfo: { ...source, path: "/p.md" } },
-      ]),
-    ).toEqual([{ name: "tdd", description: "Test first", path: "/s/SKILL.md" }]);
-  });
-});
-
 describe("branchContains", () => {
   it("accepts a null leaf and leaves on the current branch only", () => {
     const has = branchContains({ getBranch: () => [{ id: "a" }, { id: "b" }] as SessionEntry[] });
@@ -463,7 +388,7 @@ describe("branchContains", () => {
 
 describe("permission hook", () => {
   const hookCommand = () =>
-    sessionMeta(true).claudeCode.options.settings.hooks.PreToolUse[0]?.hooks[0]?.command ?? "";
+    sessionMeta(true, {}).claudeCode.options.settings.hooks.PreToolUse[0]?.hooks[0]?.command ?? "";
   const runHook = (input: object) =>
     new Promise<string>((resolve, reject) => {
       const child = execFile("sh", ["-c", hookCommand()], (error, stdout) =>
@@ -485,5 +410,29 @@ describe("permission hook", () => {
     await expect(
       runHook({ hook_event_name: "PreToolUse", permission_mode: "auto", tool_name: "Bash" }),
     ).resolves.toBe("");
+  });
+
+  it("reads the mode of the session, not a permission_mode key inside the tool input", async () => {
+    const input = {
+      session_id: "s",
+      permission_mode: "default",
+      hook_event_name: "PreToolUse",
+      tool_name: "mcp__pi__eval",
+      tool_input: { options: { permission_mode: "auto" } },
+    };
+    expect(JSON.parse(await runHook(input)).hookSpecificOutput.permissionDecision).toBe("ask");
+  });
+
+  it("reads the mode in pretty-printed input too", async () => {
+    const child = execFile("sh", ["-c", hookCommand()]);
+    const out = new Promise<string>((resolve) => {
+      let text = "";
+      child.stdout?.on("data", (chunk) => {
+        text += chunk;
+      });
+      child.on("close", () => resolve(text));
+    });
+    child.stdin?.end(JSON.stringify({ permission_mode: "auto", tool_name: "Bash", tool_input: {} }, null, 2));
+    await expect(out).resolves.toBe("");
   });
 });

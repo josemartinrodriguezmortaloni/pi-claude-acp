@@ -67,7 +67,10 @@ function decide(request: RequestPermissionRequest, ctx: DecideContext): Promise<
 - Modelos y niveles de effort se leen en runtime de `configOptions`. No hay lista fija de identificadores de modelo.
 - `@agentclientprotocol/claude-agent-acp` fijado exacto en `0.84.0`. `CLAUDE_CODE_EXECUTABLE` apunta al binario `claude` del sistema; nunca al embebido.
 - Claude Code no carga nada de `~/.claude`: `settingSources: []`, sin plugins de Claude Code.
-- La extensión nunca aprueba un permiso por su cuenta. Una aprobación sale de la UI de Pi o de los plugins validadores.
+- Una aprobación sale de la UI de Pi, de los plugins validadores o del Modo que eligió el usuario (README, "Modes"). El Modo solo aprueba lo que llegaría al diálogo: un `deny` de un validador siempre gana. `ToolSearch` se aprueba en todo Modo porque solo carga herramientas diferidas. En Auto, el clasificador de Claude Code aprueba lo que no escala.
+- Ningún secreto va en una línea de comandos: el Agent SDK pasa los servidores MCP en `--mcp-config`, visible en `/proc/<pid>/cmdline`. Los valores de headers y env viajan en el entorno del proceso de Claude Code como `${PI_MCP_<n>}` (`mcp-config.ts`).
+- El texto que escriben las herramientas, los subagentes, el modelo o un servidor MCP se muestra sin secuencias de escape de terminal (`terminal-text.ts`).
+- El log (`~/.pi/agent/claude-acp/adapter.log`) tiene modo `0600`, nombra cada herramienta sin su comando y rota a `adapter.log.1` al pasar 1 MiB.
 - La extensión no escribe en stdout ni stderr del proceso de Pi.
 - Cada cambio probable toca un solo módulo. `index.ts` solo registra y une.
 
@@ -116,17 +119,17 @@ function decide(request: RequestPermissionRequest, ctx: DecideContext): Promise<
 - Opciones de cada `newSession`/`resumeSession`, vía `_meta.claudeCode.options`:
   - `settingSources: []`.
   - `settings` inline con el hook `PreToolUse`, matcher `*`, tipo command, que devuelve `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}`.
-- `mcpServers` del request ACP: leídos de `~/.pi/agent/mcp.json`.
+- `mcpServers` del request ACP: leídos de `~/.pi/agent/mcp.json`, más el servidor del harness en una sesión de Pi. Sus valores de headers y env pasan a `_meta.claudeCode.options.env` (§3).
 - `cwd`: ruta absoluta del cwd de Pi al crear la sesión.
-- Después de crear o reanudar: `setSessionMode("default")`, porque el adaptador lee `defaultMode` de `~/.claude` aunque `settingSources` sea `[]` (`claude-agent-acp/dist/settings.js:79-88`).
+- Después de crear o reanudar: `setSessionMode(<Modo de la sesión de Pi>)`, porque el adaptador lee `defaultMode` de `~/.claude` aunque `settingSources` sea `[]` (`claude-agent-acp/dist/settings.js:79-88`). Una sesión nueva empieza en Manual (`default`); las sesiones descartables, siempre en `default`.
 - Bloque de contexto de Pi: `~/.pi/agent/AGENTS.md`, `AGENTS.md` del proyecto y lista de skills de Pi (nombre, descripción, ruta de `SKILL.md`). Va antes del primer prompt de cada sesión ACP y se reenvía tras una sesión nueva, un reinicio (casos 6 y 7) o un `compaction_update` de Claude Code.
 - Persistencia: `pi.appendEntry("claude-acp-session", {acpSessionId, leafId})` después de cada turno; se lee en `session_start` con `ctx.sessionManager.getEntries()`.
-- Reanudación: `resumeSession` (no reproduce historial). Si falla, sesión nueva y aviso en el stream.
-- Divergencia: si el `leafId` guardado no está en `ctx.sessionManager.getBranch()`, sesión nueva y aviso. Un fork de Pi crea otro id de sesión sin registro, lo que abre una sesión nueva. No se usa `unstable_forkSession`.
+- Reanudación: `resumeSession` (no reproduce historial). Si falla, sesión nueva y un aviso con `ui.notify`, fuera del transcript (CONTEXT.md, "Aviso").
+- Divergencia: si el `leafId` guardado no está en `ctx.sessionManager.getBranch()`, sesión nueva y aviso con `ui.notify`. Un fork de Pi crea otro id de sesión sin registro, lo que abre una sesión nueva. No se usa `unstable_forkSession`.
 - Serialización: una cola por sesión; el segundo prompt espera al primero.
 - Llamadas internas: `options.sessionId !== ctx.sessionManager.getSessionId()` identifica compaction y resúmenes (`pi-coding-agent/dist/core/sdk.js:257`). Van a una sesión ACP descartable.
 - Compactación de Pi: `session_before_compact` devuelve `{cancel: true}` cuando el modelo activo es `claude-acp`. Cuando exista el plugin de self-compact, él toma ese evento y este handler se quita.
-- `ctx` se vuelve a capturar en cada `session_start` y se limpia en `session_shutdown`.
+- `ctx` se vuelve a capturar en cada `session_start` y se limpia en `session_shutdown`. En todo `session_shutdown`, la instancia cierra sus sesiones ACP, su turno vivo y su servidor del harness; el adaptador compartido solo se cierra con `quit` o `reload`.
 
 ### 5.4 stream.ts
 
@@ -151,12 +154,14 @@ function decide(request: RequestPermissionRequest, ctx: DecideContext): Promise<
 
 - Toda herramienta de Claude Code llega acá, por el hook de §5.3.
 - Puente: emite `claude-acp:tool-request` en `pi.events` con `{toolCall, options, vote(promise)}`. Espera los votos.
-  - Cualquier `deny` → rechazo.
+  - Cualquier `deny` → rechazo, también para `ExitPlanMode`.
   - Algún `ask`, o sin validadores → UI de Pi con herramienta, comando o ruta, y opciones.
   - Todos `allow` → aprobación.
 - Opciones `allow_always` (optionId `allow-with-updates`) filtradas: con el hook `"ask"` la regla escrita se ignora y la opción engaña.
 - Sin UI (`ctx.hasUI === false`) y sin decisión de validadores → rechazo.
-- Request durante una cancelación → `cancelled`.
+- Request durante una cancelación → `cancelled`, también en el diálogo del plan.
+- `ExitPlanMode`: los validadores votan, pero un `allow` no lo aprueba; sin `deny`, decide el usuario en el diálogo del plan.
+- El título del diálogo muestra el comando o la ruta; sin ninguno, la entrada completa de la herramienta, un campo por línea y sin cortes.
 
 ## 6. Casos límite
 
@@ -175,7 +180,7 @@ Los 25 casos de la especificación original se mantienen, con estos ajustes:
 Casos nuevos, cada uno con test:
 
 - **C26** — `sessions.ts`: toda sesión se crea con `settingSources: []` y el hook `"ask"`.
-- **C27** — `sessions.ts`: tras crear o reanudar se llama `setSessionMode("default")`.
+- **C27** — `sessions.ts`: tras crear o reanudar se llama `setSessionMode` con el Modo de la sesión de Pi.
 - **C28** — `sessions.ts`: el bloque de contexto va solo en el primer prompt y se reenvía tras reinicio o `compaction_update`.
 - **C29** — `sessions.ts`: `session_before_compact` se cancela con modelo `claude-acp` y no con otros.
 - **C30** — `permissions.ts`: combinaciones de votos (deny gana; ask → UI; all allow → aprobación; sin votos → UI; sin UI → rechazo).
@@ -217,7 +222,7 @@ Casos nuevos, cada uno con test:
 No confirmado en runtime (evidencia solo por grep del binario 2.1.285):
 
 - Que el hook `"ask"` de la capa inline se ejecute con `settingSources: []`. Se verifica en el smoke test.
-- Que `bypassPermissions` o el clasificador del modo `auto` nunca conviertan un `"ask"` en allow. Mitigación: `setSessionMode("default")`.
+- Que `bypassPermissions` nunca convierta un `"ask"` en allow. Mitigación: el Modo Bypass no se ofrece. En Auto, el hook se aparta a propósito y decide el clasificador.
 
 ## 9. Alcance y entrega
 
@@ -225,5 +230,4 @@ No confirmado en runtime (evidencia solo por grep del binario 2.1.285):
 - Fuera de alcance:
   - Plugin validador en TS que reemplaza `guard-bash.sh` y las 15 reglas `Read(...)` deny de `~/.claude/settings.json`, con config en `~/.pi/agent/`. Se diseña en otra sesión contra el contrato de §5.5.
   - Plugin de self-compact. Toma `session_before_compact` cuando exista.
-  - Modos de trabajo: Pi 0.99.1 no los trae (`pi-coding-agent/docs/usage.md:44-53`).
 - `pi-shell-acp` sigue instalado para otros providers. Alerta: con Claude corre sin `guard-bash.sh` ni las reglas deny (`pi-shell-acp/acp-bridge.ts:1150`, `index.ts:132`).

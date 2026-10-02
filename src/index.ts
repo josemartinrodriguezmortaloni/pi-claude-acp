@@ -4,9 +4,11 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { activityTool } from "./activity.ts";
 import { Catalog } from "./catalog.ts";
 import { adapterConnection, createLog, type Log, type SharedConnection } from "./connection.ts";
+import { buildContextBlock, loadContextSources, skillsFromCommands } from "./context-block.ts";
 import { answerElicitation } from "./elicitation.ts";
 import { HarnessServer } from "./harness-server.ts";
 import { attachToTerminal, LOGIN_COMMAND, type LoginDeps, login, warnIfLoggedOut } from "./login.ts";
+import { loadMcpServers } from "./mcp-config.ts";
 import { copy } from "./messages.ts";
 import { MODE_SHORTCUT, ModeControl } from "./mode-control.ts";
 import { autoApproves, MODE_ENTRY } from "./modes.ts";
@@ -14,15 +16,11 @@ import { decide } from "./permissions.ts";
 import { type ProgressItem, planItems, progressWidget, subagentItems } from "./progress-widget.ts";
 import {
   branchContains,
-  buildContextBlock,
-  loadContextSources,
-  loadMcpServers,
   openProbe,
   PROVIDER_ID,
   SESSION_ENTRY,
   SessionStore,
-  shouldCancelCompaction,
-  skillsFromCommands,
+  usesClaudeAcp,
 } from "./sessions.ts";
 import { type StreamDeps, streamPrompt } from "./stream.ts";
 import { TurnRegistry } from "./turn.ts";
@@ -167,20 +165,22 @@ export async function registerClaudeAcp(
     // A failed adapter start is already reported by the catalog load above.
     void warnIfLoggedOut(current, loginDeps).catch(() => undefined);
   });
+  // Pi replaces this extension instance after every shutdown: what it opened closes here.
   pi.on("session_shutdown", (event, current) => {
     current.ui.setWidget(PLAN_WIDGET, undefined);
     current.ui.setWidget(SUBAGENT_WIDGET, undefined);
     ctx = undefined;
-    if (event.reason === "quit" || event.reason === "reload") {
-      adapter.close();
-      void harness.close();
-    }
+    turns.discard(current.sessionManager.getSessionId());
+    void harness.close();
+    if (event.reason === "quit" || event.reason === "reload") adapter.close();
+    else void store.closeAll();
   });
   // Pi ran a tool call; when it is a harness call, the agent waits for this result (docs/adr/0002).
   pi.on("tool_execution_end", (event) => turns.settleHarness(event.toolCallId, event.result, event.isError));
   pi.on("model_select", (_event, current) => modes.showStatus(current));
+  // Claude Code compacts its own history, so Pi's compaction would summarize a transcript it never sends.
   pi.on("session_before_compact", (_event, current) =>
-    shouldCancelCompaction(current.model) ? { cancel: true } : undefined,
+    usesClaudeAcp(current.model) ? { cancel: true } : undefined,
   );
   pi.on("agent_end", (_event, current) => {
     // A turn still live here lost its agent loop (an abort between bursts): nothing will read it.

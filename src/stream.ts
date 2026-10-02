@@ -12,17 +12,18 @@ import {
   type Tool,
   type ToolCall,
   type TranscriptContext,
-  type Usage,
   type UserMessage,
 } from "@earendil-works/pi-ai";
 import { ACTIVITY_TOOL } from "./activity.ts";
 import type { ToolEntry } from "./burst.ts";
+import { claudeCodeMeta } from "./claude-code-meta.ts";
 import { type AcpConnection, errorText, type Log } from "./connection.ts";
 import { harnessTools, isHarnessReport } from "./harness.ts";
 import { LOGIN_HINT } from "./login.ts";
 import { copy } from "./messages.ts";
 import type { Reasoning } from "./reasoning.ts";
 import type { AcpSession, OpenTurn, TurnRequest } from "./sessions.ts";
+import { printable } from "./terminal-text.ts";
 import {
   type Activity,
   type HarnessCall,
@@ -31,6 +32,8 @@ import {
   type TurnEvent,
   type TurnRegistry,
 } from "./turn.ts";
+import { decideFor } from "./turn-permissions.ts";
+import { addUsage, toUsage } from "./usage.ts";
 
 const AUTH_REQUIRED_CODE = -32000;
 /** Updates that carry the model's own words. */
@@ -56,7 +59,7 @@ export interface StreamDeps {
   ): Promise<T>;
   decide(request: acp.RequestPermissionRequest, signal?: AbortSignal): Promise<acp.RequestPermissionResponse>;
   elicit(request: acp.CreateElicitationRequest, signal?: AbortSignal): Promise<acp.CreateElicitationResponse>;
-  /** Shows a session notice outside the transcript. */
+  /** Shows a warning about the session (an aviso) outside the transcript. */
   notify(message: string): void;
   /** Shows the agent's plan in a live widget. */
   showPlan(entries: acp.PlanEntry[]): void;
@@ -131,7 +134,7 @@ async function startSegment(
   push: Push,
 ): Promise<AssistantMessageEvent> {
   const live = deps.turns.live(options.sessionId);
-  if (isAborted(options.signal)) return abandon(state, live, deps);
+  if (options.signal?.aborted) return abandon(state, live, deps);
   offerHarnessTools(context, options.sessionId, deps);
   const turn = await turnFor(live, state, context, options, deps);
   return runSegment({ state, turn, options, deps, push }, options.signal);
@@ -172,10 +175,6 @@ function steersOf(context: TranscriptContext): acp.ContentBlock[][] {
     .map(userBlocks);
 }
 
-function isAborted(signal: AbortSignal | undefined): boolean {
-  return signal?.aborted === true;
-}
-
 /** Pi stopped before this call started: the live turn, if any, ends with it. */
 function abandon(state: SegmentState, live: LiveTurn | undefined, deps: StreamDeps): AssistantMessageEvent {
   if (live?.key) deps.turns.discard(live.key);
@@ -206,8 +205,8 @@ async function openTurn(
 }
 
 async function promptInto(turn: LiveTurn, opened: OpenTurn, deps: StreamDeps): Promise<void> {
-  opened.notices.forEach((notice) => {
-    deps.notify(notice);
+  opened.warnings.forEach((warning) => {
+    deps.notify(warning);
   });
   if (turn.signal.aborted)
     return turn.events.push({ kind: "end", response: { stopReason: "cancelled" }, cost: 0 });
@@ -251,51 +250,6 @@ function isToolReport(
   update: acp.SessionUpdate,
 ): update is Extract<acp.SessionUpdate, { sessionUpdate: "tool_call" | "tool_call_update" }> {
   return update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update";
-}
-
-/** The book shows the tool as awaiting while the dialog is open, and as rejected when the answer is no. */
-async function decideFor(
-  turn: LiveTurn,
-  request: acp.RequestPermissionRequest,
-  deps: StreamDeps,
-): Promise<acp.RequestPermissionResponse> {
-  const id = request.toolCall.toolCallId;
-  turn.tools.mark(id, "awaiting");
-  const response = await decideLogged(withToolName(request, turn.tools.get(id).name), turn.signal, deps);
-  turn.tools.mark(id, rejects(request, response) ? "rejected" : "pending");
-  return response;
-}
-
-/**
- * The adapter's permission request carries no tool name (only the title, which for Bash is the command
- * itself); the dialog takes it from the tool_call report.
- */
-function withToolName(request: acp.RequestPermissionRequest, toolName: string): acp.RequestPermissionRequest {
-  const meta = Object(request.toolCall._meta) as Record<string, unknown>;
-  const claudeCode = { toolName, ...Object(meta.claudeCode) };
-  return { ...request, toolCall: { ...request.toolCall, _meta: { ...meta, claudeCode } } };
-}
-
-function rejects(request: acp.RequestPermissionRequest, response: acp.RequestPermissionResponse): boolean {
-  const outcome = response.outcome;
-  const optionId = outcome.outcome === "selected" ? outcome.optionId : undefined;
-  return request.options.some((option) => option.optionId === optionId && option.kind.startsWith("reject"));
-}
-
-/** Every permission request and its answer go to the log: a pending one is what hangs a turn. */
-async function decideLogged(
-  request: acp.RequestPermissionRequest,
-  signal: AbortSignal,
-  deps: StreamDeps,
-): Promise<acp.RequestPermissionResponse> {
-  const tool = request.toolCall.title ?? request.toolCall.toolCallId;
-  deps.log(`permiso pedido: ${tool}`);
-  const response = await deps.decide(request, signal);
-  const outcome = response.outcome;
-  deps.log(
-    `permiso respondido: ${tool} → ${outcome.outcome === "selected" ? outcome.optionId : "cancelled"}`,
-  );
-  return response;
 }
 
 type SessionEffect<K extends acp.SessionUpdate["sessionUpdate"]> = (
@@ -502,7 +456,7 @@ function addSubagentText(update: acp.SessionUpdate, turn: LiveTurn): void {
 
 /** claude-agent-acp stamps everything a subagent emits with its Task tool id (acp-agent.js:483-491). */
 function parentToolUseId(update: acp.SessionUpdate): string | undefined {
-  const id = Object(Object(Object(update)._meta).claudeCode).parentToolUseId;
+  const id = claudeCodeMeta(update).parentToolUseId;
   return typeof id === "string" ? id : undefined;
 }
 
@@ -532,19 +486,6 @@ async function endTurn(
   if (steers.length === 0) return stopEvent(state, reason);
   segment.turn = await openTurn(state, steers, segment.options, deps);
   return undefined;
-}
-
-/** The usage of a message that spans several ACP turns. */
-function addUsage(first: Usage, second: Usage): Usage {
-  return {
-    input: first.input + second.input,
-    output: first.output + second.output,
-    cacheRead: first.cacheRead + second.cacheRead,
-    cacheWrite: first.cacheWrite + second.cacheWrite,
-    reasoning: (first.reasoning ?? 0) + (second.reasoning ?? 0),
-    totalTokens: first.totalTokens + second.totalTokens,
-    cost: { ...first.cost, total: first.cost.total + second.cost.total },
-  };
 }
 
 /**
@@ -600,9 +541,10 @@ function appendChunk(
   return content.type === "text" ? append(state, kind, content.text) : [];
 }
 
+/** The model can repeat what a tool printed, escape sequences included. */
 function append(state: SegmentState, kind: BlockKind, delta: string): AssistantMessageEvent[] {
   const opening = state.open?.block.type === kind ? [] : [...closeBlock(state), openBlock(state, kind)];
-  return [...opening, ...growBlock(state, delta)];
+  return [...opening, ...growBlock(state, printable(delta))];
 }
 
 function openBlock(state: SegmentState, kind: BlockKind): AssistantMessageEvent {
@@ -652,26 +594,12 @@ function doneEvent(state: SegmentState): AssistantMessageEvent {
   return { type: "done", reason: "stop", message: state.message };
 }
 
+/** An error message can quote the adapter's stderr, which tools write to. */
 function failEvent(state: SegmentState, reason: "aborted" | "error", message: string): AssistantMessageEvent {
   closeBlock(state);
   state.message.stopReason = reason;
-  state.message.errorMessage = message;
+  state.message.errorMessage = printable(message);
   return { type: "error", reason, error: state.message };
-}
-
-const count = (value: number | null | undefined) => value ?? 0;
-
-function toUsage(usage: acp.Usage | null | undefined, cost: number): Usage {
-  const reported: Partial<acp.Usage> = usage ?? {};
-  return {
-    input: count(reported.inputTokens),
-    output: count(reported.outputTokens),
-    cacheRead: count(reported.cachedReadTokens),
-    cacheWrite: count(reported.cachedWriteTokens),
-    reasoning: count(reported.thoughtTokens),
-    totalTokens: count(reported.totalTokens),
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: Math.max(cost, 0) },
-  };
 }
 
 /** The last user message as ACP content. The agent keeps the rest of the conversation. */

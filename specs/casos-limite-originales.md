@@ -12,8 +12,8 @@ Fuente: especificación original de `pi-claude-acp`, provista por el usuario el 
 
 ## sessions.ts
 
-6. Sesión de Pi reanudada tras reiniciar Pi: el mapeo piSessionId → sessionId de ACP persiste junto a la sesión de Pi. Si el agente anuncia resume o load, se reanuda; si no, o si falla, se abre una sesión nueva y el stream avisa en texto que Claude Code no tiene el historial previo.
-7. Branch, fork o edición de un mensaje anterior en Pi: el historial de Pi deja de coincidir con el del agente. Se abre una sesión ACP nueva y el stream avisa que el contexto de Claude Code se reinició.
+6. Sesión de Pi reanudada tras reiniciar Pi: el mapeo piSessionId → sessionId de ACP persiste junto a la sesión de Pi. Si el agente anuncia resume o load, se reanuda; si no, o si falla, se abre una sesión nueva y un aviso de Pi (`ui.notify`) dice que el modelo no tiene el historial previo.
+7. Branch, fork o edición de un mensaje anterior en Pi: el historial de Pi deja de coincidir con el del agente. Se abre una sesión ACP nueva y un aviso de Pi (`ui.notify`) dice que el contexto del modelo se reinició.
 8. Dos prompts simultáneos sobre la misma sesión: se serializan; el segundo espera al fin del primero.
 9. El cwd de la sesión ACP es la ruta absoluta del cwd de Pi al crear la sesión.
 10. Pi invoca al provider para tareas internas que no son turnos del usuario (por ejemplo, el resumen de compactación): van a una sesión ACP descartable y nunca a la sesión del usuario.

@@ -1,7 +1,9 @@
+import { lstatSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ToolCallUpdate } from "@agentclientprotocol/sdk";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import { toolNameOf } from "./claude-code-meta.ts";
 
 /**
  * The modes the extension offers, in `alt+m` order. They are claude-agent-acp mode ids
@@ -53,10 +55,6 @@ export function autoApproves(mode: ModeId, toolCall: ToolCallUpdate, cwd: string
   return INTERNAL_TOOLS.has(toolNameOf(toolCall)) || MODE_RULES[mode](toolCall, cwd);
 }
 
-function toolNameOf(toolCall: ToolCallUpdate): string {
-  return String(Object(Object(toolCall._meta).claudeCode).toolName ?? "");
-}
-
 function isEdit(toolCall: ToolCallUpdate): boolean {
   return EDIT_TOOLS.has(toolNameOf(toolCall));
 }
@@ -74,7 +72,41 @@ function editedPaths(toolCall: ToolCallUpdate): string[] {
   return [...named, ...(toolCall.locations ?? []).map((location) => location.path)];
 }
 
-function isInside(path: string, cwd: string): boolean {
-  const fromCwd = relative(cwd, resolve(cwd, path));
-  return fromCwd !== "" && !fromCwd.startsWith("..") && !isAbsolute(fromCwd);
+/** Compares real paths: a symlink inside `dir` can point anywhere, and the edit follows it. */
+function isInside(path: string, dir: string): boolean {
+  const real = realPath(resolve(dir, path));
+  const root = realPath(dir);
+  return real !== undefined && root !== undefined && isBelow(real, root);
+}
+
+function isBelow(path: string, dir: string): boolean {
+  const fromDir = relative(dir, path);
+  return fromDir !== "" && !fromDir.startsWith("..") && !isAbsolute(fromDir);
+}
+
+/**
+ * `path` with every symlink resolved. A file not created yet resolves through its closest existing
+ * parent. A symlink whose target does not exist yet has no real path: writing creates the target.
+ */
+function realPath(path: string): string | undefined {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return isLink(path) ? undefined : realChild(path);
+  }
+}
+
+function realChild(path: string): string | undefined {
+  const parent = dirname(path);
+  if (parent === path) return path;
+  const realParent = realPath(parent);
+  return realParent && join(realParent, basename(path));
+}
+
+function isLink(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
 }
