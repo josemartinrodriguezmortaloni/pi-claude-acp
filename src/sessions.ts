@@ -58,6 +58,8 @@ export interface AcpSession {
   needsContext: boolean;
   /** Cumulative `usage_update.cost.amount` seen so far. */
   costTotal: number;
+  /** The last `usage_update.used`: the tokens in the context window after the latest request. */
+  contextUsed: number;
 }
 
 export interface OpenedSession {
@@ -233,9 +235,12 @@ export class SessionStore {
     return record;
   }
 
-  /** Prepends the Pi context block to the first prompt of a session. */
+  /**
+   * Prepends the Pi context block to the first prompt of a session. A slash command goes alone:
+   * Claude Code runs it only when the prompt starts with it, and the block waits for the next prompt.
+   */
   async promptBlocks(session: AcpSession, blocks: ContentBlock[], cwd: string): Promise<ContentBlock[]> {
-    if (!session.needsContext) return blocks;
+    if (!session.needsContext || isSlashCommand(blocks)) return blocks;
     session.needsContext = false;
     return [{ type: "text", text: await this.deps.contextBlock(cwd) }, ...blocks];
   }
@@ -333,7 +338,7 @@ function newSession(
   configOptions: SessionConfigOption[] | null | undefined,
   needsContext: boolean,
 ): AcpSession {
-  return { id, conn, configOptions: configOptions ?? [], needsContext, costTotal: 0 };
+  return { id, conn, configOptions: configOptions ?? [], needsContext, costTotal: 0, contextUsed: 0 };
 }
 
 async function setOption(session: AcpSession, configId: string, value: string): Promise<void> {
@@ -374,6 +379,11 @@ export function branchContains(manager: { getBranch(): SessionEntry[] }) {
 }
 
 /** Whether the active Pi model runs through this extension. */
+function isSlashCommand(blocks: ContentBlock[]): boolean {
+  const first = blocks[0];
+  return first?.type === "text" && first.text.startsWith("/");
+}
+
 export function usesClaudeAcp(model: { provider: string } | undefined): boolean {
   return model?.provider === PROVIDER_ID;
 }

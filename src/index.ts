@@ -3,6 +3,7 @@ import type { ExtensionAPI, ExtensionContext, ProviderModelConfig } from "@earen
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { activityTool } from "./activity.ts";
 import { Catalog } from "./catalog.ts";
+import { COMPACT_COMMAND, compact } from "./compact.ts";
 import { adapterConnection, createLog, type Log, type SharedConnection } from "./connection.ts";
 import { buildContextBlock, loadContextSources, skillsFromCommands } from "./context-block.ts";
 import { answerElicitation } from "./elicitation.ts";
@@ -152,6 +153,11 @@ export async function registerClaudeAcp(
   pi.registerCommand(LOGIN_COMMAND, {
     description: copy.loginCommandDescription,
     handler: (_args, current) => login(current, loginDeps),
+  });
+
+  pi.registerCommand(COMPACT_COMMAND, {
+    description: copy.compactCommandDescription,
+    handler: (args, current) => compact(args, current, (text) => pi.sendUserMessage(text)),
   });
 
   pi.on("session_start", (_event, current) => {

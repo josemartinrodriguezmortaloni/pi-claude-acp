@@ -94,7 +94,7 @@ export function createSegmentState(model: Model<Api>): SegmentState {
       api: model.api,
       provider: model.provider,
       model: model.id,
-      usage: toUsage(undefined, 0),
+      usage: toUsage(undefined, 0, 0),
       stopReason: "pending",
       timestamp: Date.now(),
     },
@@ -209,7 +209,7 @@ async function promptInto(turn: LiveTurn, opened: OpenTurn, deps: StreamDeps): P
     deps.notify(warning);
   });
   if (turn.signal.aborted)
-    return turn.events.push({ kind: "end", response: { stopReason: "cancelled" }, cost: 0 });
+    return turn.events.push({ kind: "end", response: { stopReason: "cancelled" }, cost: 0, context: 0 });
   const { session } = opened;
   const costBefore = session.costTotal;
   turn.onCancel(() => cancelPrompt(session, deps));
@@ -221,7 +221,8 @@ async function promptInto(turn: LiveTurn, opened: OpenTurn, deps: StreamDeps): P
   try {
     const response = await session.conn.agent.prompt({ sessionId: session.id, prompt: opened.prompt });
     if (response.stopReason === "cancelled") turn.tools.interruptOpen();
-    turn.events.push({ kind: "end", response, cost: session.costTotal - costBefore });
+    const cost = session.costTotal - costBefore;
+    turn.events.push({ kind: "end", response, cost, context: session.contextUsed });
   } finally {
     unlisten();
   }
@@ -263,6 +264,7 @@ type SessionEffect<K extends acp.SessionUpdate["sessionUpdate"]> = (
 const SESSION_EFFECTS: { [K in acp.SessionUpdate["sessionUpdate"]]?: SessionEffect<K> } = {
   usage_update: (update, turn, session, deps) => {
     if (update.cost) session.costTotal = update.cost.amount;
+    session.contextUsed = update.used;
     deps.onContextWindow(turn.modelId, update.size);
   },
   compaction_update: (update, _turn, session, deps) => deps.noteCompaction(session, update),
@@ -480,7 +482,10 @@ async function endTurn(
   const { state, turn, deps, push } = segment;
   push(closeBlock(state));
   deps.turns.close(turn);
-  state.message.usage = addUsage(state.message.usage, toUsage(event.response.usage, event.cost));
+  state.message.usage = addUsage(
+    state.message.usage,
+    toUsage(event.response.usage, event.cost, event.context),
+  );
   const reason = stopReasonOf(event.response.stopReason, turn);
   const steers = reason === "end_turn" ? turn.takeSteers() : [];
   if (steers.length === 0) return stopEvent(state, reason);

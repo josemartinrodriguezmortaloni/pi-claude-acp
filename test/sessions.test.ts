@@ -262,6 +262,15 @@ describe("SessionStore.promptBlocks", () => {
     s.noteCompaction(session, { compactionId: "c1", status: "completed" });
     expect(await s.promptBlocks(session, user, "/work")).toHaveLength(2);
   });
+
+  it("C38: sends a slash command alone and keeps the context block for the next prompt", async () => {
+    const conn = new FakeConnection();
+    const { store: s } = store();
+    const { session } = await s.ensure(conn, "pi-1", "/work", anyBranch);
+    const command = [{ type: "text" as const, text: "/compact keep the decisions" }];
+    expect(await s.promptBlocks(session, command, "/work")).toEqual(command);
+    expect(await s.promptBlocks(session, user, "/work")).toHaveLength(2);
+  });
 });
 
 describe("SessionStore.serialize", () => {

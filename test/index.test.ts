@@ -109,6 +109,11 @@ describe("registerClaudeAcp", () => {
     expect(commands.get("claude-login")?.description).toBe(copy.loginCommandDescription);
   });
 
+  it("registers /claude-compact", async () => {
+    const { commands } = await setup();
+    expect(commands.get("claude-compact")?.description).toBe(copy.compactCommandDescription);
+  });
+
   it("C6: persists the ACP session after each turn", async () => {
     const conn = new FakeConnection();
     const { providers, handlers, entries } = await setup(conn);

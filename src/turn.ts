@@ -12,7 +12,7 @@ import { Reasoning, type ReasoningDetails } from "./reasoning.ts";
 export type TurnEvent =
   | { kind: "update"; update: acp.SessionUpdate }
   | { kind: "harness"; call: HarnessCall }
-  | { kind: "end"; response: acp.PromptResponse; cost: number }
+  | { kind: "end"; response: acp.PromptResponse; cost: number; context: number }
   | { kind: "error"; error: unknown };
 
 /** What a harness tool returns in Pi: its tool result content. */

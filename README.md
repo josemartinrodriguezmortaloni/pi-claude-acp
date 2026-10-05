@@ -344,7 +344,7 @@ Text stays text. Everything else Claude Code does is an entry of `agent_activity
 | A subagent's tools                      | Under its `AGENT` branch, shown when expanded                          |
 | A failed tool                           | `FAILED` chip and its output, always                                   |
 | `plan`                                  | Widget above the editor                                                |
-| `usage_update`                          | Turn cost and the model's context window                               |
+| `usage_update`                          | Turn cost, context size and the model's context window                 |
 | `compaction_update`                     | The next prompt carries the context block again                        |
 
 Only tools that change something carry a chip. Each state has its own mark, so the transcript reads without color: `…` running, `? awaiting approval`, `✗ rejected`, `■ interrupted`. Text from tools, subagents and the model shows without terminal escape sequences: a file the agent reads cannot write your clipboard or redraw the screen.
@@ -373,7 +373,8 @@ flowchart TD
 
 - Turns of one Pi session run one after another.
 - A notice about the session, such as a reset, shows as a Pi notification, never inside the model's answer.
-- Pi's own compaction is cancelled for `claude-acp` models: Claude Code compacts its own history.
+- Pi's own compaction is cancelled for `claude-acp` models: Claude Code compacts its own history. It compacts by itself only when `autoCompactEnabled` is `true` in `~/.claude.json`.
+- `/claude-compact [instructions]` sends Claude Code's `/compact` as the next prompt. A slash command goes without the context block; the block goes with the next prompt.
 
 ### Models
 
@@ -385,6 +386,8 @@ The catalog comes from the `model` and `effort` config options of the adapter. T
 | Any other         | The closest offered level at or below it                               |
 
 The context window starts at 128000 tokens and changes to the value Claude Code reports after the first turn. The turn cost is the delta of Claude Code's cumulative cost.
+
+Pi reads the context size from `totalTokens`. The extension sets it to the last `usage_update.used`, the context of the turn's last model request. The other token counts sum every request of the turn, so they count billed tokens, not the context.
 
 ## Architecture
 
@@ -399,7 +402,7 @@ Each module owns one reason to change. `index.ts` only registers the provider an
 | `terminal-text.ts` | Text safe to print: no escape sequences or control characters      | What a terminal runs changes         |
 | `claude-code-meta.ts` | The adapter's `_meta.claudeCode` fields                          | The adapter's meta format changes    |
 | `turn-permissions.ts` | A permission request of a turn: the tool's state and the log     | The permission flow of a turn changes |
-| `usage.ts`       | ACP usage → Pi usage, summed across ACP turns                         | The usage format changes             |
+| `usage.ts`       | ACP usage → Pi usage: billed tokens summed, context from `usage_update.used` | The usage format changes       |
 | `files.ts`       | Reading a file that may not exist                                     | How optional files are read changes  |
 | `catalog.ts`     | `configOptions` → Pi models and thinking levels                       | The adapter's model format changes   |
 | `stream.ts`      | `session/update` → Pi message events, one segment per Pi message      | The Pi or ACP stream contract changes |
@@ -418,6 +421,7 @@ Each module owns one reason to change. `index.ts` only registers the provider an
 | `elicitation.ts` | ACP form elicitation → Pi dialogs                                     | The elicitation contract changes     |
 | `dialogs.ts`     | One Pi dialog at a time                                               | Pi's dialog model changes            |
 | `login.ts`       | Login check at session start and `/claude-login`                      | Claude Code's auth CLI changes       |
+| `compact.ts`     | `/claude-compact`: Claude Code's `/compact` sent from Pi              | How Claude Code compacts on request changes |
 | `messages.ts`    | Every text the extension shows, by locale                             | A text or a language changes         |
 
 ```mermaid

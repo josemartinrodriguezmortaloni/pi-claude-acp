@@ -511,7 +511,7 @@ describe("streamPrompt: content", () => {
     expect(last).toMatchObject({
       type: "done",
       reason: "stop",
-      message: { usage: { input: 30, output: 12, totalTokens: 42 } },
+      message: { usage: { input: 30, output: 12 } },
     });
   });
 
@@ -735,13 +735,13 @@ describe("streamPrompt: end of turn", () => {
 
   it("C19: reads token usage from the prompt response and cost as the delta of the cumulative amount", async () => {
     const h = harness();
-    const usage = (amount: number): SessionUpdate => ({
+    const usage = (amount: number, used = 5000): SessionUpdate => ({
       sessionUpdate: "usage_update",
-      used: 5000,
+      used,
       size: 1_000_000,
       cost: { amount, currency: "USD" },
     });
-    script(h.conn, [usage(0.5)], {
+    script(h.conn, [usage(0.2, 3000), usage(0.5)], {
       stopReason: "end_turn",
       usage: { inputTokens: 10, outputTokens: 20, cachedReadTokens: 30, totalTokens: 60, thoughtTokens: 5 },
     });
@@ -754,14 +754,28 @@ describe("streamPrompt: end of turn", () => {
       cacheRead: 30,
       cacheWrite: 0,
       reasoning: 5,
-      totalTokens: 60,
+      totalTokens: 5000,
       cost: { total: 0.5 },
     });
     expect(second?.type === "done" && second.message.usage.cost.total).toBeCloseTo(0.3);
     expect(h.windows).toEqual([
       ["opus", 1_000_000],
       ["opus", 1_000_000],
+      ["opus", 1_000_000],
     ]);
+  });
+
+  it("C39: measures the context with the last usage_update.used, not the tokens the turn summed", async () => {
+    const h = harness();
+    script(h.conn, [{ sessionUpdate: "usage_update", used: 80_000, size: 1_000_000 }], {
+      stopReason: "end_turn",
+      usage: { inputTokens: 40, outputTokens: 900, cachedReadTokens: 1_500_000, totalTokens: 1_500_940 },
+    });
+    const last = (await h.run([user("uno")])).at(-1);
+    expect(last?.type === "done" && last.message.usage).toMatchObject({
+      cacheRead: 1_500_000,
+      totalTokens: 80_000,
+    });
   });
 
   it("C20: aborts: cancels the ACP turn, cancels pending permissions and ends aborted", async () => {

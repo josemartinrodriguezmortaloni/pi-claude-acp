@@ -191,6 +191,9 @@ Casos nuevos, cada uno con test:
 - **C35** — `login.ts`: `/claude-login` detiene la TUI, corre `claude auth login` con la terminal de Pi y reanuda la TUI.
 - **C36** — `login.ts`: tras un login confirmado por `auth status`, el adaptador se reinicia; sin login confirmado, no.
 - **C37** — `login.ts`: fuera de la TUI, `/claude-login` no corre nada e indica `claude auth login` en una terminal.
+- **C38** — `sessions.ts`: un prompt que empieza con `/` va sin el bloque de contexto; el bloque queda pendiente para el próximo prompt.
+- **C39** — `usage.ts`, `stream.ts`: `totalTokens` es el último `usage_update.used`, no la suma de los requests del turno; en un mensaje de varios turnos ACP gana el contexto del último.
+- **C40** — `compact.ts`: `/claude-compact` espera el fin del turno y envía `/compact` con las instrucciones; con otro provider no envía nada.
 
 ## 7. Verificación
 

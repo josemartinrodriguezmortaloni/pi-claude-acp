@@ -22,6 +22,8 @@ export interface Messages {
   loginOutsideTui(command: string): string;
   loggedIn: string;
   loginIncomplete(command: string): string;
+  compactCommandDescription: string;
+  compactOtherProvider: string;
   resumeFailed: string;
   branchDiverged: string;
   turnCancelled: string;
@@ -92,6 +94,8 @@ const EN: Messages = {
     `/${command} needs Pi's TUI. Log in by running \`claude auth login\` in a terminal.`,
   loggedIn: "You are logged in. The next turn uses the new account.",
   loginIncomplete: (command) => `The login did not finish. Run /${command} again.`,
+  compactCommandDescription: "Compact the model's history; optional instructions for the summary",
+  compactOtherProvider: "This model is not a Claude (subscription) model. Use /compact.",
   resumeFailed: "The previous session could not be resumed. A new session started without its history.",
   branchDiverged: "The conversation changed (branch, fork or edit). The model context was reset.",
   turnCancelled: "Turn cancelled.",
@@ -173,6 +177,8 @@ const ES: Messages = {
     `/${command} necesita la TUI de Pi. Iniciá sesión ejecutando \`claude auth login\` en una terminal.`,
   loggedIn: "La sesión está iniciada. El próximo turno usa la cuenta nueva.",
   loginIncomplete: (command) => `El login no se completó. Volvé a ejecutar /${command}.`,
+  compactCommandDescription: "Compactá el historial del modelo; instrucciones opcionales para el resumen",
+  compactOtherProvider: "Este modelo no es de Claude (suscripción). Usá /compact.",
   resumeFailed: "No se pudo reanudar la sesión anterior. Se abrió una sesión nueva sin su historial.",
   branchDiverged: "La conversación cambió (rama, fork o edición). El contexto del modelo se reinició.",
   turnCancelled: "Turno cancelado.",
