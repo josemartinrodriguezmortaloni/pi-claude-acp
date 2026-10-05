@@ -7,6 +7,7 @@ import { COMPACT_COMMAND, compact } from "./compact.ts";
 import { adapterConnection, createLog, type Log, type SharedConnection } from "./connection.ts";
 import { buildContextBlock, loadContextSources, skillsFromCommands } from "./context-block.ts";
 import { answerElicitation } from "./elicitation.ts";
+import { hiddenTools } from "./harness.ts";
 import { HarnessServer } from "./harness-server.ts";
 import { attachToTerminal, LOGIN_COMMAND, type LoginDeps, login, warnIfLoggedOut } from "./login.ts";
 import { loadMcpServers } from "./mcp-config.ts";
@@ -99,6 +100,7 @@ export async function registerClaudeAcp(
     noteCompaction: (session, update) => store.noteCompaction(session, update),
     onModeChange: (modeId) => void modes.agentChanged(requireCtx(), modeId),
     offerTools: (piSessionId, tools) => harness.setTools(piSessionId, tools),
+    hiddenTools: () => hiddenTools(pi.getSettings()),
     turns,
     isAgentSession: (sessionId) =>
       sessionId !== undefined && sessionId === ctx?.sessionManager.getSessionId(),

@@ -45,6 +45,7 @@ const deps: StreamDeps = {
   notify: () => {},
   onModeChange: () => {},
   offerTools: () => {},
+  hiddenTools: () => [],
   // The smoke turn runs in one Pi message: it checks the ACP path, not the activity tool.
   turns: new TurnRegistry(),
   isAgentSession: () => false,

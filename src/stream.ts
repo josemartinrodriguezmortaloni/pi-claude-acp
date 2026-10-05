@@ -71,6 +71,8 @@ export interface StreamDeps {
   onModeChange(modeId: string): void;
   /** Sets the harness tools the agent of the Pi session `sessionId` can call. */
   offerTools(sessionId: string, tools: Tool[]): void;
+  /** Patterns of the Pi tools the agent does not get, read again on every request. */
+  hiddenTools(): string[];
   turns: TurnRegistry;
   /** Whether `sessionId` names the Pi session of the agent loop. Other requests are internal calls. */
   isAgentSession(sessionId: string | undefined): boolean;
@@ -147,7 +149,7 @@ function offerHarnessTools(
   deps: StreamDeps,
 ): void {
   if (sessionId !== undefined && deps.isAgentSession(sessionId))
-    deps.offerTools(sessionId, harnessTools(context));
+    deps.offerTools(sessionId, harnessTools(context, deps.hiddenTools()));
 }
 
 /**

@@ -45,7 +45,7 @@ function user(text: string): Message {
   return { role: "user", content: text, timestamp: 0 };
 }
 
-function harness(conn = new FakeConnection(), beforeTask = () => {}) {
+function harness(conn = new FakeConnection(), beforeTask = () => {}, hidden: string[] = []) {
   const store = new SessionStore({
     mcpServers: async () => [],
     contextBlock: async () => "<pi-context/>",
@@ -82,6 +82,7 @@ function harness(conn = new FakeConnection(), beforeTask = () => {}) {
     showPlan: (entries) => plans.push(entries),
     showSubagents: (tools) => subagentTools.push(tools),
     offerTools: (sessionId, tools) => offered.push([sessionId, tools.map((tool) => tool.name)]),
+    hiddenTools: () => hidden,
     onContextWindow: (modelId, size) => windows.push([modelId, size]),
     noteCompaction: (session, update) => store.noteCompaction(session, update),
     turns: new TurnRegistry(),
@@ -941,6 +942,19 @@ describe("streamPrompt: harness tools", () => {
       h.deps,
     ));
     expect(h.offered).toEqual([["pi-1", ["eval", "codemode"]]]);
+  });
+
+  it("C41: leaves out the tools that match claudeAcp.hiddenTools", async () => {
+    const h = harness(new FakeConnection(), () => {}, ["mem_*", "query-docs"]);
+    const tool = (name: string) => ({ name, description: name, parameters: Type.Object({}) });
+    const tools = ["mem_save", "mem_search", "query-docs", "query-docs-v2", "eval"].map(tool);
+    for await (const _ of streamPrompt(
+      MODEL,
+      normalizeContext({ messages: [user("hola")], tools }),
+      { sessionId: "pi-1" },
+      h.deps,
+    ));
+    expect(h.offered).toEqual([["pi-1", ["query-docs-v2", "eval"]]]);
   });
 
   it("offers no tools for Pi internal calls", async () => {

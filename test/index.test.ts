@@ -26,6 +26,7 @@ function fakePi(authStatus = '{"loggedIn": true}') {
     on: (event: string, handler: Handler) => handlers.set(event, handler),
     appendEntry: (customType: string, data: unknown) => entries.push({ customType, data }),
     getCommands: () => [],
+    getSettings: () => ({}),
     exec: async (command: string, args: string[]) => {
       executed.push(`${command} ${args.join(" ")}`);
       return { stdout: authStatus, stderr: "", code: 0, killed: false };

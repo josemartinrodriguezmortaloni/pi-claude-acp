@@ -120,12 +120,13 @@ Pi hands its terminal to `claude auth login`, which opens the browser login. Whe
 
 ## Configuration
 
-The extension has no settings file. It reads these sources:
+The extension has no settings file of its own. It reads these sources:
 
 | Source                                           | Use                                                                                                          |
 | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
 | `CLAUDE_CODE_EXECUTABLE`                         | Path to the `claude` binary. Without it, the extension looks up `claude` on the `PATH`                        |
 | `~/.pi/agent/mcp.json`                           | MCP servers passed to each Claude Code session; servers with `"enabled": false` are skipped. Header and env values go to the Claude Code environment as `${PI_MCP_<n>}`, never to its command line |
+| `claudeAcp.hiddenTools` in `~/.pi/agent/settings.json` | Pi tools Claude Code does not get as harness tools; `*` matches any characters. Use it for extensions that copy the tools of an `mcp.json` server, such as gentle-engram (`"mem_*"`) or context7-pi (`"resolve-library-id"`, `"query-docs"`), so Claude Code gets each tool once. Read again on every request |
 | `~/.pi/agent/AGENTS.md`, `./AGENTS.md`, Pi skills | Sent as a `<pi-context>` block before the first prompt of each Claude Code session                            |
 | `LC_ALL`, `LC_MESSAGES`, `LANG`                  | Language of every text the extension shows, in that order. Without a catalog for it, English                  |
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`      | Removed from the agent's environment, so Claude Code uses your Claude login and never bills Pi's key          |
@@ -311,7 +312,7 @@ Two widgets above the editor show work in progress: Claude Code's plan, and the 
 
 ### Harness tools
 
-Claude Code has its own Read, Edit, Write, Bash, Grep and Glob, but Pi extensions register tools it lacks, such as `eval` and `codemode`. The extension serves these harness tools on an MCP server at `127.0.0.1`, with one bearer token per Pi session, and passes it to each Claude Code session as `pi`. Claude Code sees every active Pi tool except Pi's `read`, `edit`, `write`, `bash`, `grep`, `find` and `ls`, and the server refuses a call to any tool it did not offer. The token travels in the environment of the Claude Code process, not on its command line, and dies with the Pi session.
+Claude Code has its own Read, Edit, Write, Bash, Grep and Glob, but Pi extensions register tools it lacks, such as `eval` and `codemode`. The extension serves these harness tools on an MCP server at `127.0.0.1`, with one bearer token per Pi session, and passes it to each Claude Code session as `pi`. Claude Code sees every active Pi tool except Pi's `read`, `edit`, `write`, `bash`, `grep`, `find` and `ls` and the tools of `claudeAcp.hiddenTools`, and the server refuses a call to any tool it did not offer. The token travels in the environment of the Claude Code process, not on its command line, and dies with the Pi session.
 
 When Claude Code calls `mcp__pi__eval`, the call goes through the mode like any other tool. Then the provider ends the Pi message with a real `eval` tool call. Pi runs it with its own renderer and hooks, and the result goes back to Claude Code when Pi reports `tool_execution_end`. Tools of the burst that still run continue in a new activity entry after the harness tool. See [ADR 0002](docs/adr/0002-herramientas-del-harness-por-ida-y-vuelta.md).
 

@@ -194,6 +194,7 @@ Casos nuevos, cada uno con test:
 - **C38** — `sessions.ts`: un prompt que empieza con `/` va sin el bloque de contexto; el bloque queda pendiente para el próximo prompt.
 - **C39** — `usage.ts`, `stream.ts`: `totalTokens` es el último `usage_update.used`, no la suma de los requests del turno; en un mensaje de varios turnos ACP gana el contexto del último.
 - **C40** — `compact.ts`: `/claude-compact` espera el fin del turno y envía `/compact` con las instrucciones; con otro provider no envía nada.
+- **C41** — `harness.ts`: las herramientas de Pi que coinciden con `claudeAcp.hiddenTools` de `settings.json` (`*` = cualquier texto) no llegan al agente; sin la clave, o con un valor que no es una lista de nombres, no se oculta nada.
 
 ## 7. Verificación
 

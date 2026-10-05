@@ -12,12 +12,36 @@ const AGENT_NATIVE = new Set(["read", "edit", "write", "bash", "grep", "find", "
 /** How claude-agent-acp names a tool of the harness MCP server in its reports. */
 const REPORT_PREFIX = `mcp__${HARNESS_SERVER}__`;
 
-/** The harness tools of a request: the Pi tools the agent can call through the harness. */
-export function harnessTools(context: TranscriptContext): Tool[] {
+/** Pi's settings with the key of this extension. */
+interface ClaudeAcpSettings {
+  claudeAcp?: { hiddenTools?: unknown };
+}
+
+/**
+ * The harness tools of a request: the Pi tools the agent can call through the harness, except the
+ * `hidden` ones. Pi extensions such as gentle-engram and context7-pi register tools with the names
+ * of the MCP servers the agent already gets from `mcp.json`; `hidden` leaves those out.
+ */
+export function harnessTools(context: TranscriptContext, hidden: string[]): Tool[] {
+  const isHidden = matcher(hidden);
   return getCurrentTools(context.messages).filter(
-    (tool) => !AGENT_NATIVE.has(tool.name) && tool.name !== ACTIVITY_TOOL,
+    (tool) => !AGENT_NATIVE.has(tool.name) && tool.name !== ACTIVITY_TOOL && !isHidden(tool.name),
   );
 }
+
+/** `claudeAcp.hiddenTools` of Pi's settings: tool names, where `*` matches any characters. */
+export function hiddenTools(settings: object): string[] {
+  const value = (settings as ClaudeAcpSettings).claudeAcp?.hiddenTools;
+  return Array.isArray(value) ? value.filter((pattern) => typeof pattern === "string") : [];
+}
+
+function matcher(patterns: string[]): (name: string) => boolean {
+  const expressions = patterns.map(toRegExp);
+  return (name) => expressions.some((expression) => expression.test(name));
+}
+
+const toRegExp = (pattern: string) => new RegExp(`^${pattern.split("*").map(literal).join(".*")}$`);
+const literal = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /** A tool report of a harness tool. Pi shows that call as its own tool, so no burst shows it. */
 export function isHarnessReport(update: acp.SessionUpdate): boolean {
